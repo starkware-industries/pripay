@@ -1,0 +1,83 @@
+/**
+ * Real PrivateTransfers implementation using Starknet contracts.
+ */
+import { ActionCompiler } from "./compiler.js";
+import { AbstractPrivateTransfers } from "./abstract-private-transfers.js";
+import { CallMockProofProvider } from "./mock-proving.js";
+import { debugLog } from "../utils/logging.js";
+import { toBigInt, toHex } from "../utils/convert.js";
+import { screeningCalldataSuffix } from "./screening-calldata.js";
+import { poolModeForClassHash } from "./pool-mode.js";
+export class PrivateTransfers extends AbstractPrivateTransfers {
+    params;
+    constructor(params) {
+        super(params.account.address, params.viewingKeyProvider, params.discoveryProvider);
+        this.params = params;
+    }
+    async getCompiler() {
+        const viewingKey = await this.params.viewingKeyProvider.getViewingKey();
+        return new ActionCompiler(this.user, viewingKey, this.params.discoveryProvider, toBigInt(this.params.poolContractAddress));
+    }
+    async createProofInvocation(actions, options) {
+        // Get viewing key for both compiler and calldata
+        const viewingKey = await this.params.viewingKeyProvider.getViewingKey();
+        const compiler = new ActionCompiler(this.user, viewingKey, this.params.discoveryProvider, toBigInt(this.params.poolContractAddress));
+        // Compile actions
+        const { clientActions, registry, warnings } = await compiler.compile(actions, options);
+        // Create invocation for proving
+        const details = await this.params.provingProvider.getDefaultDetails();
+        const invocation = await this.params.proofInvocationFactory.create({ ...this.params.account, viewingKey }, this.params.poolContractAddress, clientActions, details);
+        return { invocation, registry, warnings };
+    }
+    invalidateProofNonceCache() {
+        this.params.provingProvider.invalidateNonceCache?.();
+    }
+    async executeWithInvocation({ invocation, registry, warnings }, provingBlockId) {
+        const proof = await this.params.provingProvider.prove(invocation, provingBlockId);
+        return this.buildExecuteResult(proof, registry, warnings);
+    }
+    /**
+     * Assemble the `apply_actions` call and `ExecuteResult` from a proof. Shared
+     * by `executeWithInvocation` (real proof) and `simulate` (mock proof) so both
+     * produce identical calldata — notably the trailing screening attestation.
+     */
+    buildExecuteResult(proof, registry, warnings) {
+        // proof.output is the L2-to-L1 message payload: [class_hash, ...serialized_actions].
+        // Strip the class_hash prefix — apply_actions expects only Span<ServerAction>.
+        const serverActionsCalldata = proof.output.slice(1);
+        // Parse and log server actions for debugging
+        const parsedOutput = () => this.params.proofInvocationFactory.parseOutput(serverActionsCalldata);
+        debugLog("private-transfers", "execute", "parsed server actions", parsedOutput);
+        // The pool version — not signature presence — decides the calldata shape:
+        // a screening-capable pool expects a trailing Option<ScreeningAttestation>,
+        // the pre-screening pool none. poolMode overrides detection for pools
+        // whose class hash isn't pinned.
+        const mode = this.params.poolMode ?? poolModeForClassHash(proof.output[0]);
+        const screeningSuffix = mode === "screening" ? screeningCalldataSuffix(proof.additionalData) : [];
+        return {
+            callAndProof: {
+                call: {
+                    contractAddress: toHex(this.params.poolContractAddress),
+                    entrypoint: "apply_actions",
+                    calldata: [...serverActionsCalldata, ...screeningSuffix],
+                },
+                proof,
+            },
+            registry,
+            warnings,
+        };
+    }
+    async simulate(actions, options) {
+        const { invocation, registry, warnings } = await this.createProofInvocation(actions, options);
+        // Source chainId from the same provider the mock prover calls, so proof
+        // facts and signature validation are computed for the chain that actually
+        // executes the view call.
+        const chainId = await options.provider.getChainId();
+        const mockProvider = new CallMockProofProvider(options.provider, chainId, {
+            validateSignature: options.validateSignature ?? false,
+        });
+        const proof = await mockProvider.prove(invocation, options.provingBlockId);
+        return this.buildExecuteResult(proof, registry, warnings);
+    }
+}
+//# sourceMappingURL=private-transfers.js.map

@@ -1,0 +1,92 @@
+import { ec, encode } from "starknet";
+import { toHex, toBytes, toBigInt } from "./convert.js";
+// ============ Hash Function ============
+/**
+ * Convert a short string (up to 31 chars) to a felt, matching Cairo's short string literals.
+ * e.g., 'channel_key:v1' in Cairo becomes the same bigint.
+ */
+export function shortStringToFelt(str) {
+    if (str.length > 31) {
+        throw new Error(`Short string must be <= 31 chars, got ${str.length}`);
+    }
+    return BigInt(toHex(str));
+}
+/**
+ * Check if a string is a numeric string (hex like "0x..." or decimal digits only).
+ */
+function isNumericString(str) {
+    return /^0x[0-9a-fA-F]+$/.test(str) || /^[0-9]+$/.test(str);
+}
+/**
+ * Poseidon hash of multiple felts.
+ * String arguments are converted as follows:
+ * - Numeric strings (hex "0x..." or decimal) are converted via toBigInt
+ * - Short ASCII strings (domain tags like "channel_key:v1") are converted as Cairo short strings
+ *
+ * Note: This matches Cairo's hash function which does:
+ *   PoseidonTrait::new().update_with(poseidon_hash_span(data)).finalize()
+ * This is effectively h(h(data)) - a double hash.
+ */
+export function hash(...values) {
+    const feltValues = values.map((v) => {
+        if (typeof v === "string") {
+            // Numeric strings should be converted to bigint, not as short strings
+            return isNumericString(v) ? toBigInt(v) : shortStringToFelt(v);
+        }
+        return toBigInt(v);
+    });
+    // Match Cairo's hash function: h(data)
+    return ec.starkCurve.poseidonHashMany(feltValues);
+}
+// ============ ECDH Utilities ============
+const starkCurve = ec.starkCurve;
+/**
+ * Get the x-coordinate from a public key bytes (compressed or uncompressed).
+ */
+function getXCoordinateFromBytes(publicKeyBytes) {
+    // If 33 bytes (compressed), skip the prefix byte
+    // If 65 bytes (uncompressed), skip prefix and take first 32 bytes
+    const start = publicKeyBytes.length === 33 ? 1 : publicKeyBytes.length === 65 ? 1 : 0;
+    const end = start + 32;
+    return BigInt(toHex(publicKeyBytes.slice(start, end)));
+}
+/**
+ * Derive public key from private key (returns x-coordinate).
+ */
+export function derivePublicKey(privateKey) {
+    const privateKeyBytes = toBytes(privateKey);
+    const publicKeyBytes = starkCurve.getPublicKey(privateKeyBytes);
+    return getXCoordinateFromBytes(publicKeyBytes);
+}
+// ============ Symmetric Encryption ============
+/** Generate a random bigint for use in encryption */
+export function generateRandom() {
+    // Generate a 252-bit random value (valid felt252)
+    return encode.uint8ArrayToBigInt(starkCurve.utils.randomPrivateKey());
+}
+/** Generate a 120-bit random value for note encryption */
+export function generateRandom120() {
+    const bytes = new Uint8Array(15); // 15 bytes = 120 bits
+    crypto.getRandomValues(bytes);
+    let result = 0n;
+    for (const byte of bytes) {
+        result = (result << 8n) | BigInt(byte);
+    }
+    return result;
+}
+export function encryptSymmetric(shared, data, r) {
+    // make sure r is  a felt252
+    if (r < 0n || r >= starkCurve.CURVE.n) {
+        throw new Error(`r must be a felt252, got ${r}`);
+    }
+    return {
+        r,
+        enc: (hash(shared, r) + toBigInt(data)) % starkCurve.CURVE.n,
+    };
+}
+export function decryptSymmetric(encryption, shared) {
+    return encryption.enc - (hash(shared, encryption.r) % starkCurve.CURVE.n);
+}
+// Re-export toBigInt for backwards compatibility
+export { toBigInt } from "./convert.js";
+//# sourceMappingURL=crypto.js.map

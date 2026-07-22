@@ -1,0 +1,11 @@
+# Rebuilt on Vercel by installCommand / buildCommand — don't ship the committed
+# copies (they'd bloat the deploy and the local esbuild is the wrong arch).
+node_modules
+package-lock.json
+pripay/bundle.js
+pripay/bundle.js.map
+
+# Local-only secrets / state — never deploy.
+avnu.local.json
+data
+.pripay-local

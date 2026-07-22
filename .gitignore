@@ -1,0 +1,40 @@
+node_modules/
+bundle.js
+bundle.js.map
+
+# Local python venv for the hash-equivalence check (see scripts/check-hash-equivalence/README.md)
+scripts/check-hash-equivalence/.venv/
+scripts/check-hash-equivalence/.h.node
+scripts/check-hash-equivalence/.h.py
+
+# Cairo / Scarb build output
+target/
+
+# Firestore emulator debug logs — transient, never commit
+*-debug.log
+
+# Local onboarding state — contains viewing key + onboarded payroll address.
+# Even on testnet, the viewing key reveals private-pool notes for that wallet.
+data/pripay.json
+
+# Local paymaster credentials for the demo — Sepolia private key, never commit.
+pripay/paymaster.local.json
+
+# Local env / secrets for deployment — never commit (holds tokens + API keys).
+.env
+.env.*
+avnu.local.json
+
+# Local agent/editor tooling + local data — never commit (public repo hygiene).
+.claude/
+.serena/
+data/
+
+# Test fixtures contain testnet private keys — never commit.
+src/test-flow.ts
+.cursor/rules/shared/comments.md
+.gitignore
+src/sdk_integration/test-flow.ts
+.cursor/rules/shared/company-guidelines.md
+contracts/target/
+contracts/.snfoundry_cache/

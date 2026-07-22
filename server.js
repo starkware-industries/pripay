@@ -1,0 +1,525 @@
+const express = require('express');
+const cors    = require('cors');
+const path    = require('path');
+const https   = require('https');
+const http    = require('http');
+const crypto  = require('crypto');
+// Persistence backend, in priority order:
+//   1. Upstash Redis / Vercel KV — when KV_REST_API_URL (or UPSTASH_…) is set.
+//      The only durable option on serverless (Vercel), where a local file would
+//      not survive between invocations.
+//   2. Local JSON file — development, when LOCAL_STORE=1 or no GCP project.
+//   3. Firestore over REST — production on GCP (GOOGLE_CLOUD_PROJECT set).
+const useKv = !!(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL);
+const useLocalStore = !useKv && (process.env.LOCAL_STORE === '1' || !process.env.GOOGLE_CLOUD_PROJECT);
+const store   = useKv ? require('./kv-store')
+  : useLocalStore ? require('./local-store')
+  : require('./firestore-rest');
+
+// The app is served over HTTPS but the privacy prover + discovery indexer are
+// plain HTTP, which browsers block as mixed content. We forward them through
+// same-origin /api/prover and /api/discovery/* — server-side HTTP has no mixed
+// content. Upstreams are env-configurable; defaults match network-config's active
+// network (sepolia). Mainnet values: transaction-prover / discovery-service at
+// .alpha-mainnet.sw-dev.io (override via env when flipping network-config to mainnet).
+const PROVER_UPSTREAM    = process.env.PROVER_UPSTREAM    || 'https://transaction-prover.alpha-sepolia.sw-dev.io';
+const DISCOVERY_UPSTREAM = process.env.DISCOVERY_UPSTREAM || 'https://discovery-service.alpha-sepolia.sw-dev.io';
+
+// Streaming reverse proxy to a fixed upstream. Mounted with app.use so req.url is
+// the path below the mount point. Registered BEFORE express.json so the body
+// streams through untouched (proof payloads can be large and non-JSON).
+// Never forward the caller's auth material (session cookie, Basic-Auth header)
+// to third-party upstreams — the proxy talks to StarkWare services, not us.
+function sanitizeUpstreamHeaders(headers, host) {
+  const out = { ...headers, host };
+  delete out.cookie;
+  delete out.authorization;
+  delete out['x-goog-authenticated-user-email'];
+  return out;
+}
+
+function streamProxy(upstreamBase) {
+  const target = new URL(upstreamBase);
+  const lib = target.protocol === 'https:' ? https : http;
+  const basePath = target.pathname === '/' ? '' : target.pathname.replace(/\/$/, '');
+  return (req, res) => {
+    const upstreamReq = lib.request(
+      {
+        hostname: target.hostname,
+        port: target.port || (target.protocol === 'https:' ? 443 : 80),
+        path: basePath + req.url,
+        method: req.method,
+        headers: sanitizeUpstreamHeaders(req.headers, target.host),
+      },
+      (upRes) => {
+        res.writeHead(upRes.statusCode, upRes.headers);
+        upRes.pipe(res);
+      },
+    );
+    upstreamReq.on('error', (e) => {
+      console.warn('[proxy] upstream error:', e.message);
+      if (!res.headersSent) res.status(502).json({ error: 'upstream error' });
+    });
+    req.pipe(upstreamReq);
+  };
+}
+
+const PORT = process.env.PORT || 8080;
+
+// Each /api key is one document in the `kv` collection. The key is encoded so
+// colons (e.g. `pripay:vk:0x…`) survive the REST path; Firestore docs are maps,
+// so the caller's value (object OR bare array) is wrapped under `value`.
+const KV = 'kv';
+const kvPath = (key) => `${KV}/${encodeURIComponent(key)}`;
+
+// Bank of Israel's daily representative rate (shaar yatzig). Cached for a
+// calendar day since BoI publishes once around 15:30 IST on business days.
+let boiUsdCache = null; // { date: 'YYYY-MM-DD', rate: number, fetchedAt: number }
+const BOI_URL = 'https://www.boi.org.il/PublicApi/GetExchangeRate?key=USD';
+
+function fetchBoiUsdRate(cb) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (boiUsdCache && boiUsdCache.date === today) {
+    return cb(null, boiUsdCache);
+  }
+  https.get(BOI_URL, { timeout: 5000 }, (res) => {
+    if (res.statusCode !== 200) {
+      res.resume();
+      return cb(new Error('BoI returned HTTP ' + res.statusCode));
+    }
+    let body = '';
+    res.on('data', (chunk) => { body += chunk; });
+    res.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const rate = Number(data.currentExchangeRate);
+        if (!Number.isFinite(rate) || rate <= 0) {
+          return cb(new Error('BoI rate missing or invalid: ' + body.slice(0, 200)));
+        }
+        boiUsdCache = { date: today, rate, fetchedAt: Date.now() };
+        cb(null, boiUsdCache);
+      } catch (err) {
+        cb(err);
+      }
+    });
+  }).on('error', cb).on('timeout', () => cb(new Error('BoI request timed out')));
+}
+
+const app = express();
+// CORS: the SPA calls the API same-origin, so cross-origin is disabled by
+// default (no ACAO header). Set ALLOWED_ORIGINS (comma-separated) to opt in.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+app.use(cors({ origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : false }));
+
+// Baseline security headers. (A full script/connect-src CSP is a follow-up: it
+// needs a resource-origin audit + test pass — some crypto deps may use eval, and
+// connect-src must enumerate the RPC/price hosts — so we ship the safe subset now.)
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  next();
+});
+
+// Stopgap site gate (HTTP Basic Auth) for pre-launch deployments, active only
+// when both BASIC_AUTH_USER and BASIC_AUTH_PASS are set. Lets us keep a public
+// host (e.g. a Vercel production URL we can't put behind platform protection)
+// closed to the world until real auth lands. NOT a substitute for real auth —
+// it gates the whole app behind one shared credential.
+const GATE_USER = process.env.BASIC_AUTH_USER;
+const GATE_PASS = process.env.BASIC_AUTH_PASS;
+if (GATE_USER && GATE_PASS) {
+  app.use((req, res, next) => {
+    const [scheme, encoded] = String(req.headers.authorization || '').split(' ');
+    if (scheme === 'Basic' && encoded) {
+      const [u, p] = Buffer.from(encoded, 'base64').toString().split(':');
+      if (u === GATE_USER && p === GATE_PASS) return next();
+    }
+    res.set('WWW-Authenticate', 'Basic realm="PriPay", charset="UTF-8"');
+    return res.status(401).send('Authentication required.');
+  });
+}
+
+// ── Sign-In-With-Starknet (SIWS) ────────────────────────────────────────────
+// Wallet-scoped endpoints are keyed only by address, which a caller could
+// otherwise spoof. On login the client signs a server nonce; we verify the
+// signature against the account contract and set an HttpOnly session cookie, and
+// wallet-scoped endpoints then require a session whose address matches the target.
+//
+// Stateless: nonce + session are HMAC-signed tokens (no store). AUTH_SECRET must
+// be STABLE in deployment — serverless runs many instances and a per-boot random
+// secret would only validate on the instance that issued it. A random dev
+// fallback is used when unset (fine for a single local process).
+if (!process.env.AUTH_SECRET && process.env.VERCEL) {
+  // Fail fast: on serverless, every instance must share a stable secret, or
+  // sessions validate only on the instance that issued them.
+  throw new Error('AUTH_SECRET must be set in production.');
+}
+const AUTH_SECRET = process.env.AUTH_SECRET || crypto.randomBytes(32).toString('hex');
+if (!process.env.AUTH_SECRET) {
+  console.warn('[auth] AUTH_SECRET not set — using an ephemeral dev secret (local only).');
+}
+const NONCE_TTL_MS   = 5 * 60 * 1000;
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SESSION_COOKIE = 'pripay_session';
+const STARKNET_RPC   = process.env.STARKNET_RPC_URL || 'https://starknet-sepolia-rpc.publicnode.com';
+const EXPECTED_CHAIN = process.env.STARKNET_CHAIN_ID || 'SN_SEPOLIA'; // SNIP-12 domain.chainId to accept
+
+// Best-effort in-memory rate limit (per instance; on serverless this bounds one
+// instance, not the whole fleet — a shared Upstash counter would be global).
+const _rl = new Map();
+function rateLimited(key, max, windowMs) {
+  const now = Date.now();
+  const b = _rl.get(key);
+  if (!b || now > b.resetAt) { _rl.set(key, { n: 1, resetAt: now + windowMs }); return false; }
+  if (b.n >= max) return true;
+  b.n++;
+  return false;
+}
+function clientIp(req) {
+  return String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+    || (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+// Preload the (heavy) starknet module at init, so a cold /api/auth/verify doesn't
+// pay the import inside the request; cache the RPC provider across invocations.
+const starknetReady = import('starknet').catch((e) => {
+  console.warn('[auth] starknet preload failed:', e.message);
+  return null;
+});
+let _snProvider = null;
+async function verifySignature(typedData, signature, addr) {
+  const sn = await starknetReady;
+  if (!sn) throw new Error('starknet module unavailable');
+  if (!_snProvider) _snProvider = new sn.RpcProvider({ nodeUrl: STARKNET_RPC });
+  return _snProvider.verifyMessageInStarknet(typedData, signature, addr);
+}
+
+function hmac(data) { return crypto.createHmac('sha256', AUTH_SECRET).update(data).digest('base64url'); }
+function safeEq(a, b) {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+function toFelt(x) { return '0x' + BigInt(x).toString(16); }   // canonical; throws on bad input
+function feltEq(a, b) { try { return BigInt(a) === BigInt(b); } catch { return false; } }
+
+// token = base64url(JSON).hmac — used for both the login nonce and the session.
+function signToken(obj) {
+  const body = Buffer.from(JSON.stringify(obj)).toString('base64url');
+  return body + '.' + hmac(body);
+}
+function verifyToken(token) {
+  if (typeof token !== 'string' || !token.includes('.')) return null;
+  const i = token.lastIndexOf('.');
+  const body = token.slice(0, i);
+  if (!safeEq(token.slice(i + 1), hmac(body))) return null;
+  try { return JSON.parse(Buffer.from(body, 'base64url').toString()); } catch { return null; }
+}
+
+function isHttps(req) {
+  return !!req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+}
+function setSessionCookie(req, res, value, maxAgeSec) {
+  const p = [`${SESSION_COOKIE}=${value}`, 'HttpOnly', 'Path=/', 'SameSite=Lax', `Max-Age=${maxAgeSec}`];
+  if (isHttps(req)) p.push('Secure');
+  res.setHeader('Set-Cookie', p.join('; '));
+}
+function readSession(req) {
+  const c = String(req.headers.cookie || '').split(';').map((s) => s.trim())
+    .find((s) => s.startsWith(SESSION_COOKIE + '='));
+  if (!c) return null;
+  const s = verifyToken(c.slice(SESSION_COOKIE.length + 1));
+  if (!s || !s.a || (s.exp && Date.now() > s.exp)) return null;
+  return s;
+}
+// Gate: require a session proving the caller owns `targetAddr`.
+function requireWalletOwner(req, res, targetAddr) {
+  const s = readSession(req);
+  if (!s) { res.status(401).json({ error: 'wallet login required' }); return false; }
+  if (!feltEq(s.a, targetAddr)) { res.status(403).json({ error: 'wrong wallet' }); return false; }
+  return true;
+}
+// If a kv key is wallet-scoped (ends with …:0x<addr>), return that address.
+function keyOwnerAddr(key) {
+  const last = String(key).split(':').pop();
+  return /^0x[0-9a-fA-F]{1,64}$/.test(last) ? last : null;
+}
+
+// Mixed-content proxies — must precede express.json so bodies stream raw.
+app.use('/api/discovery', streamProxy(DISCOVERY_UPSTREAM));
+app.use('/api/prover', streamProxy(PROVER_UPSTREAM));
+
+app.use(express.json({ limit: '2mb' }));
+
+// Landing page at the root; the app itself lives at /app. Registered before
+// the static middleware, which would otherwise serve index.html at /.
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'pripay', 'landing.html')));
+app.get('/app', (req, res) => {
+  // Normalize /app/ → /app so index.html's relative asset URLs resolve at the root.
+  if (req.path !== '/app') return res.redirect(301, '/app');
+  res.sendFile(path.join(__dirname, 'pripay', 'index.html'));
+});
+
+app.use(express.static(path.join(__dirname, 'pripay')));
+
+// ── SIWS auth endpoints ──
+// 1) issue a short-lived, address-bound nonce for the wallet to sign.
+app.post('/api/auth/nonce', (req, res) => {
+  if (rateLimited('auth:' + clientIp(req), 30, 60000)) return res.status(429).json({ error: 'rate limited' });
+  let addr;
+  try { addr = toFelt((req.body || {}).address); } catch { return res.status(400).json({ error: 'bad address' }); }
+  res.json({ nonce: signToken({ a: addr, t: Date.now(), r: crypto.randomBytes(12).toString('hex') }) });
+});
+
+// 2) verify the signed nonce against the account contract; on success set the
+// session cookie. The client sends the exact typedData it signed; we trust it
+// only after checking the embedded nonce (ours, fresh, address-bound), the
+// domain, and the on-chain signature.
+app.post('/api/auth/verify', async (req, res) => {
+  if (rateLimited('auth:' + clientIp(req), 30, 60000)) return res.status(429).json({ error: 'rate limited' });
+  const { address, signature, typedData } = req.body || {};
+  let addr;
+  try { addr = toFelt(address); } catch { return res.status(400).json({ error: 'bad address' }); }
+  const msg = typedData && typedData.message;
+  const dom = typedData && typedData.domain;
+  const parsed = verifyToken(msg && msg.nonce);
+  if (!parsed || !feltEq(parsed.a, addr)) return res.status(401).json({ error: 'bad nonce' });
+  if (Date.now() - Number(parsed.t) > NONCE_TTL_MS) return res.status(401).json({ error: 'nonce expired' });
+  // Pin the full SNIP-12 domain + the signed address, to block cross-app /
+  // cross-chain signature replay.
+  if (!dom || dom.name !== 'PriPay' || String(dom.chainId) !== EXPECTED_CHAIN
+      || String(dom.version) !== '1' || String(dom.revision) !== '1') {
+    return res.status(401).json({ error: 'bad domain' });
+  }
+  if (!msg || !feltEq(msg.address, addr)) return res.status(401).json({ error: 'address mismatch' });
+  // Single-use: reject a nonce that was already consumed (anti-replay).
+  const nonceId = 'noncelog/' + parsed.r;
+  try { if (await store.getDoc(nonceId)) return res.status(401).json({ error: 'nonce already used' }); } catch { /* store down → proceed */ }
+  try {
+    const ok = await verifySignature(typedData, signature, addr);
+    if (!ok) return res.status(401).json({ error: 'invalid signature' });
+  } catch (e) {
+    console.warn('[auth] verify failed:', e.message);
+    return res.status(401).json({ error: 'signature verification failed' });
+  }
+  try { await store.setDoc(nonceId, { usedAt: Date.now() }); } catch { /* best-effort */ }
+  setSessionCookie(req, res, signToken({ a: addr, exp: Date.now() + SESSION_TTL_MS }), Math.floor(SESSION_TTL_MS / 1000));
+  res.json({ ok: true, address: addr });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  setSessionCookie(req, res, '', 0);
+  res.json({ ok: true });
+});
+
+// --- IAP identity (from the verified header — never the request body) ---
+function iapEmail(req) {
+  const raw = req.headers['x-goog-authenticated-user-email'];
+  return raw ? String(raw).replace(/^accounts\.google\.com:/, '') : null;
+}
+// Admin = the authenticated SIWS wallet is in ADMIN_WALLETS (comma-separated
+// felts). Fails CLOSED: no session, or an address not in the list, is NOT admin.
+// (The old model trusted a client-spoofable IAP header and defaulted to admin
+// when it was absent — i.e. every request on Vercel was admin.)
+function isAdminReq(req) {
+  const s = readSession(req);
+  if (!s) return false;
+  return (process.env.ADMIN_WALLETS || '')
+    .split(',').map((x) => x.trim()).filter(Boolean)
+    .some((a) => feltEq(a, s.a));
+}
+const companyKvKey = (addr) => 'pripay:companyInfo:' + String(addr).toLowerCase();
+
+// Who is the caller, and are they an admin? (Admins see Settings.) MUST precede
+// /api/:key, which would otherwise swallow GET /api/me & /api/companies as kv lookups.
+app.get('/api/me', (req, res) => {
+  const s = readSession(req);
+  res.json({ address: s ? s.a : null, isAdmin: isAdminReq(req) });
+});
+
+// Admin-only: every wallet ever connected (registry) + its company info (may be null
+// for a wallet that connected but never set up company details).
+app.get('/api/companies', async (req, res) => {
+  if (!isAdminReq(req)) return res.status(403).json({ error: 'admin only' });
+  try {
+    const regs = await store.listDocs('registry');
+    const out = [];
+    for (const r of regs) {
+      const addr = (r.data && r.data.addr) || r.id;
+      const doc = await store.getDoc(kvPath(companyKvKey(addr)));
+      out.push({ addr, company: doc ? doc.value : null });
+    }
+    res.json(out);
+  } catch (e) {
+    console.warn('[api] companies list failed:', e.message);
+    res.status(500).json({ error: 'list failed' });
+  }
+});
+
+// Read a key
+app.get('/api/:key', async (req, res) => {
+  const owner = keyOwnerAddr(req.params.key);
+  if (owner && !requireWalletOwner(req, res, owner)) return;
+  try {
+    const doc = await store.getDoc(kvPath(req.params.key));
+    res.json(doc ? doc.value : null);
+  } catch (e) {
+    console.warn('[api] get failed:', req.params.key, e.message);
+    res.status(500).json({ error: 'read failed' });
+  }
+});
+
+// Write a key
+app.put('/api/:key', async (req, res) => {
+  // Company info is permission-gated — force it through /api/company/:addr so an
+  // operator can't bypass the check by writing the kv key directly.
+  if (req.params.key.startsWith('pripay:companyInfo:')) {
+    return res.status(403).json({ error: 'use PUT /api/company/:addr' });
+  }
+  const owner = keyOwnerAddr(req.params.key);
+  if (owner && !requireWalletOwner(req, res, owner)) return;
+  try {
+    await store.setDoc(kvPath(req.params.key), { value: req.body });
+    res.json({ ok: true });
+  } catch (e) {
+    console.warn('[api] put failed:', req.params.key, e.message);
+    res.status(500).json({ error: 'write failed' });
+  }
+});
+
+// NOTE: a `GET /api` list-all endpoint was removed for security — it dumped the
+// entire kv store (every wallet's company info, tx metadata, and viewing keys),
+// bypassing the per-wallet authorization below. The client reads per-wallet only.
+
+// Per-wallet, per-record subcollections: wallets/{addr}/{kind}/{id}. One doc
+// per profile/order so concurrent sessions on the same wallet don't clobber
+// each other's whole-list writes.
+const KINDS = new Set(['profiles', 'orders']);
+const collPath = (addr, kind) => `wallets/${encodeURIComponent(addr.toLowerCase())}/${kind}`;
+const recPath  = (addr, kind, id) => `${collPath(addr, kind)}/${encodeURIComponent(id)}`;
+
+app.get('/api/wallet/:addr/:kind', async (req, res) => {
+  if (!KINDS.has(req.params.kind)) return res.status(400).json({ error: 'unknown kind' });
+  if (!requireWalletOwner(req, res, req.params.addr)) return;
+  try {
+    const docs = await store.listDocs(collPath(req.params.addr, req.params.kind));
+    res.json(docs.map((d) => d.data));
+  } catch (e) {
+    console.warn('[api] record list failed:', e.message);
+    res.status(500).json({ error: 'list failed' });
+  }
+});
+
+app.put('/api/wallet/:addr/:kind/:id', async (req, res) => {
+  if (!KINDS.has(req.params.kind)) return res.status(400).json({ error: 'unknown kind' });
+  if (!requireWalletOwner(req, res, req.params.addr)) return;
+  try {
+    await store.setDoc(recPath(req.params.addr, req.params.kind, req.params.id), req.body);
+    res.json({ ok: true });
+  } catch (e) {
+    console.warn('[api] record put failed:', e.message);
+    res.status(500).json({ error: 'write failed' });
+  }
+});
+
+app.delete('/api/wallet/:addr/:kind/:id', async (req, res) => {
+  if (!KINDS.has(req.params.kind)) return res.status(400).json({ error: 'unknown kind' });
+  if (!requireWalletOwner(req, res, req.params.addr)) return;
+  try {
+    await store.deleteDoc(recPath(req.params.addr, req.params.kind, req.params.id));
+    res.json({ ok: true });
+  } catch (e) {
+    console.warn('[api] record delete failed:', e.message);
+    res.status(500).json({ error: 'delete failed' });
+  }
+});
+
+// Registry of every wallet ever connected — so admins can manage even wallets
+// that never finished company setup. Any IAP user may register a wallet.
+app.put('/api/registry/:addr', async (req, res) => {
+  if (!requireWalletOwner(req, res, req.params.addr)) return;
+  try {
+    const addr = req.params.addr.toLowerCase();
+    await store.setDoc(`registry/${encodeURIComponent(addr)}`, { addr });
+    res.json({ ok: true });
+  } catch (e) {
+    console.warn('[api] registry put failed:', e.message);
+    res.status(500).json({ error: 'registry failed' });
+  }
+});
+
+// Company-info write, permission-enforced: allowed for an admin, an accountant of
+// THIS wallet, or first-time setup (no company yet). Operators/others are rejected.
+app.put('/api/company/:addr', async (req, res) => {
+  const addr = req.params.addr;
+  const email = iapEmail(req);
+  try {
+    const existingDoc = await store.getDoc(kvPath(companyKvKey(addr)));
+    const existing = existingDoc ? existingDoc.value : null;
+    const accountants = (existing && Array.isArray(existing.accountantEmails) ? existing.accountantEmails : [])
+      .map((s) => String(s).toLowerCase());
+    const s = readSession(req);
+    const ownsWallet = !!s && feltEq(s.a, addr);                 // proved wallet ownership via SIWS
+    const allowed = isAdminReq(req)                              // admin wallet (ADMIN_WALLETS)
+      || ownsWallet                                              // the owner can manage their own company
+      || (!!email && accountants.includes(email.toLowerCase())); // accountant (only behind a real IAP)
+    if (!allowed) return res.status(403).json({ error: 'not permitted to edit company info' });
+    await store.setDoc(kvPath(companyKvKey(addr)), { value: req.body });
+    await store.setDoc(`registry/${encodeURIComponent(addr.toLowerCase())}`, { addr: addr.toLowerCase() });
+    res.json({ ok: true });
+  } catch (e) {
+    console.warn('[api] company put failed:', e.message);
+    res.status(500).json({ error: 'write failed' });
+  }
+});
+
+// Proxy to the AVNU paymaster JSON-RPC. The API key stays server-side (Secret
+// Manager → AVNU_PAYMASTER_API_KEY); the browser only ever sees the result.
+// Only paymaster_* methods are forwarded. AVNU_PAYMASTER_URL must match the
+// active network's paymasterUrl (network-config.ts) — defaults to sepolia.
+// Mainnet value: https://starknet.paymaster.avnu.fi (override via env for mainnet).
+const AVNU_PAYMASTER_URL = process.env.AVNU_PAYMASTER_URL || 'https://sepolia.paymaster.avnu.fi';
+app.post('/api/paymaster', async (req, res) => {
+  const s = readSession(req);
+  if (!s) return res.status(401).json({ error: 'wallet login required' });
+  if (rateLimited('pm:' + s.a, 60, 60000)) return res.status(429).json({ error: 'rate limited' });
+  const apiKey = process.env.AVNU_PAYMASTER_API_KEY;
+  if (!apiKey) return res.status(503).json({ error: 'paymaster not configured (AVNU_PAYMASTER_API_KEY)' });
+  const method = req.body && req.body.method;
+  if (typeof method !== 'string' || !method.startsWith('paymaster_')) {
+    return res.status(400).json({ error: 'only paymaster_* methods are proxied' });
+  }
+  try {
+    const upstream = await fetch(AVNU_PAYMASTER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-paymaster-api-key': apiKey },
+      body: JSON.stringify(req.body),
+    });
+    const text = await upstream.text();
+    res.status(upstream.status).type('application/json').send(text);
+  } catch (e) {
+    console.warn('[paymaster] proxy failed:', e.message);
+    res.status(502).json({ error: 'paymaster upstream error' });
+  }
+});
+
+// Bank of Israel USD/ILS shaar yatzig. Cached per calendar day.
+app.get('/api-boi/usd', (req, res) => {
+  fetchBoiUsdRate((err, cached) => {
+    if (err) {
+      console.warn('[boi] fetch failed:', err.message);
+      return res.status(502).json({ error: 'rate unavailable' });
+    }
+    res.json({ ilsPerUsd: cached.rate, asOf: cached.date, source: 'Bank of Israel' });
+  });
+});
+
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`PriPay server  → http://localhost:${PORT}`);
+    console.log(`Firestore      → ${store.usingEmulator() ? process.env.FIRESTORE_EMULATOR_HOST + ' (emulator)' : 'firestore.googleapis.com'}`);
+  });
+}
+
+module.exports = app;

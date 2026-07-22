@@ -1,0 +1,31 @@
+# Controls what `gcloud run deploy --source` uploads to Cloud Build.
+# IMPORTANT: when this file exists, gcloud ignores .gitignore — so node_modules
+# (vendored, needed by the Dockerfile COPY) is INCLUDED because it's not listed.
+#
+# Paths are ANCHORED with a leading "/" so they only match the repo-root dirs,
+# NOT same-named dirs inside node_modules (e.g. node_modules/debug/src/). An
+# unanchored "src/" would strip package sources and break the runtime image.
+
+.git
+.gitignore
+.gcloudignore
+
+# Project source/tooling not needed at runtime (the built bundle ships in pripay/)
+/src/
+/test/
+/contracts/
+/scripts/
+/docs/
+
+# Local-only / transient
+/data/
+/firebase.json
+/pripay/bundle.js.map
+/.cursorrules
+/.cursor/
+/.claude/
+/.tool-versions
+*-debug.log
+
+# Local paymaster creds — never upload
+/pripay/paymaster.local.json
