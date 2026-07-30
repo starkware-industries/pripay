@@ -111,35 +111,60 @@ const app = express();
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
 app.use(cors({ origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : false }));
 
-// Baseline security headers. (A full script/connect-src CSP is a follow-up: it
-// needs a resource-origin audit + test pass — some crypto deps may use eval, and
-// connect-src must enumerate the RPC/price hosts — so we ship the safe subset now.)
+// Content-Security-Policy. Every directive below was derived by auditing what the
+// app actually loads, so it ships enforcing rather than report-only:
+//   script-src  'self'  — the only scripts are bundle.js and vendor/gsap.min.js,
+//                         both same-origin, and there is no inline <script>. Neither
+//                         gsap nor the privacy SDK does dynamic code evaluation or
+//                         uses WebAssembly, so no 'unsafe-eval' / 'wasm-unsafe-eval'.
+//   style-src   needs 'unsafe-inline': index.html carries ~258 style="…" attributes
+//                         and the pages build elements with .cssText. Removing that
+//                         is a refactor, not a header change.
+//   connect-src both networks' RPC hosts are listed so flipping network-config does
+//                         not silently break the app; the prover and indexer are
+//                         reached through same-origin /api/* proxies, not directly.
+//   img-src     data: for the embedded wallet logos, https: because a wallet
+//                         extension may hand us its own icon URL. An icon that is
+//                         still blocked degrades to fallbackIcon() via img.onerror.
+// Override CSP_CONNECT_EXTRA (space-separated origins) when adding a data source.
+const CSP_CONNECT = [
+  "'self'",
+  'https://starknet-sepolia-rpc.publicnode.com',
+  'https://starknet-rpc.publicnode.com',
+  'https://api.coingecko.com',
+  'https://starknet.api.avnu.fi',
+  ...(process.env.CSP_CONNECT_EXTRA || '').split(/\s+/).filter(Boolean),
+].join(' ');
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data: https:",
+  `connect-src ${CSP_CONNECT}`,
+  "frame-ancestors 'none'",
+  "frame-src 'none'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+].join('; ');
+
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', CSP);
   next();
 });
 
-// Stopgap site gate (HTTP Basic Auth) for pre-launch deployments, active only
-// when both BASIC_AUTH_USER and BASIC_AUTH_PASS are set. Lets us keep a public
-// host (e.g. a Vercel production URL we can't put behind platform protection)
-// closed to the world until real auth lands. NOT a substitute for real auth —
-// it gates the whole app behind one shared credential.
-const GATE_USER = process.env.BASIC_AUTH_USER;
-const GATE_PASS = process.env.BASIC_AUTH_PASS;
-if (GATE_USER && GATE_PASS) {
-  app.use((req, res, next) => {
-    const [scheme, encoded] = String(req.headers.authorization || '').split(' ');
-    if (scheme === 'Basic' && encoded) {
-      const [u, p] = Buffer.from(encoded, 'base64').toString().split(':');
-      if (u === GATE_USER && p === GATE_PASS) return next();
-    }
-    res.set('WWW-Authenticate', 'Basic realm="PriPay", charset="UTF-8"');
-    return res.status(401).send('Authentication required.');
-  });
-}
+// NOTE: the pre-launch HTTP Basic Auth site gate used to live here and was removed
+// when the app went public. It gated everything behind a single shared credential
+// that had to be passed around in chat — not a mechanism worth keeping in an
+// open-source repo — and it was the only thing standing in front of endpoints that
+// assumed they were not internet-facing (hence the session gates on /api/prover and
+// /api/discovery, and the per-wallet ceilings further down). If a deployment needs to
+// be closed off again, use Vercel's own password protection or Trusted IPs rather
+// than reintroducing an application-level shared password.
 
 // ── Sign-In-With-Starknet (SIWS) ────────────────────────────────────────────
 // Wallet-scoped endpoints are keyed only by address, which a caller could
@@ -575,6 +600,21 @@ app.put('/api/company/:addr', async (req, res) => {
 // active network's paymasterUrl (network-config.ts) — defaults to sepolia.
 // Mainnet value: https://starknet.paymaster.avnu.fi (override via env for mainnet).
 const AVNU_PAYMASTER_URL = process.env.AVNU_PAYMASTER_URL || 'https://sepolia.paymaster.avnu.fi';
+
+// Spend ceilings. paymaster_executeTransaction is the only method that actually costs
+// anything — it draws on our prepaid AVNU credits — so it carries its own limits on
+// top of the per-wallet call rate below. A per-wallet limit alone is not enough: a
+// wallet costs nothing to create, so an attacker rotating addresses would walk past
+// it. The global counter is what bounds total burn, and it is shared fleet-wide via
+// rate-limit.js rather than per instance.
+//
+// Defaults are sized for a Sepolia pilot, where a payroll run is a handful of
+// transactions. Raise both before any real volume, and keep the global ceiling below
+// what the funded credit balance can absorb in an hour.
+const PM_EXEC_PER_HOUR_WALLET = Number(process.env.PAYMASTER_EXEC_PER_HOUR_WALLET || 60);
+const PM_EXEC_PER_HOUR_GLOBAL = Number(process.env.PAYMASTER_EXEC_PER_HOUR_GLOBAL || 500);
+const HOUR_MS = 60 * 60 * 1000;
+
 app.post('/api/paymaster', async (req, res) => {
   const s = readSession(req);
   if (!s) return res.status(401).json({ error: 'wallet login required' });
@@ -584,6 +624,18 @@ app.post('/api/paymaster', async (req, res) => {
   const method = req.body && req.body.method;
   if (typeof method !== 'string' || !method.startsWith('paymaster_')) {
     return res.status(400).json({ error: 'only paymaster_* methods are proxied' });
+  }
+  if (method === 'paymaster_executeTransaction') {
+    if (await rateLimited(`pmx:${s.a}`, PM_EXEC_PER_HOUR_WALLET, HOUR_MS)) {
+      return res.status(429).json({ error: 'sponsored transaction limit reached for this wallet' });
+    }
+    if (await rateLimited('pmx:global', PM_EXEC_PER_HOUR_GLOBAL, HOUR_MS)) {
+      // Deliberately not a 503: the paymaster is configured and healthy, we are
+      // choosing not to spend more this hour. Logged so the ceiling is visible
+      // rather than looking like an AVNU outage.
+      console.warn('[paymaster] global hourly sponsored-transaction ceiling reached');
+      return res.status(429).json({ error: 'sponsored transaction capacity reached, try again later' });
+    }
   }
   try {
     const upstream = await fetch(AVNU_PAYMASTER_URL, {

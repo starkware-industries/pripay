@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build":  "esbuild src/main.ts --bundle --outfile=pripay/bundle.js --format=esm --sourcemap",
-    "watch":  "esbuild src/main.ts --bundle --outfile=pripay/bundle.js --format=esm --sourcemap --watch=forever",
+    "build": "esbuild src/main.ts --bundle --outfile=pripay/bundle.js --format=esm --sourcemap",
+    "watch": "esbuild src/main.ts --bundle --outfile=pripay/bundle.js --format=esm --sourcemap --watch=forever",
     "server": "node server.js",
-    "dev":    "concurrently -n esbuild,server -c cyan,green \"npm run watch\" \"npm run server\"",
+    "dev": "concurrently -n esbuild,server -c cyan,green \"npm run watch\" \"npm run server\"",
     "emulator": "npx firebase-tools emulators:start --only firestore",
-    "dev:db":   "concurrently -n esbuild,server,db -c cyan,green,magenta \"npm run watch\" \"npm run server\" \"npm run emulator\"",
-    "test":     "node --test"
+    "dev:db": "concurrently -n esbuild,server,db -c cyan,green,magenta \"npm run watch\" \"npm run server\" \"npm run emulator\"",
+    "test": "node --test",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@starkware-libs/starknet-privacy-sdk": "0.14.3-rc.2",
@@ -22,5 +23,8 @@
   },
   "engines": {
     "node": "22.x"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
   }
 }
