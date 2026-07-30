@@ -166,17 +166,9 @@ const SESSION_COOKIE = 'pripay_session';
 const STARKNET_RPC   = process.env.STARKNET_RPC_URL || 'https://starknet-sepolia-rpc.publicnode.com';
 const EXPECTED_CHAIN = process.env.STARKNET_CHAIN_ID || 'SN_SEPOLIA'; // SNIP-12 domain.chainId to accept
 
-// Best-effort in-memory rate limit (per instance; on serverless this bounds one
-// instance, not the whole fleet — a shared Upstash counter would be global).
-const _rl = new Map();
-function rateLimited(key, max, windowMs) {
-  const now = Date.now();
-  const b = _rl.get(key);
-  if (!b || now > b.resetAt) { _rl.set(key, { n: 1, resetAt: now + windowMs }); return false; }
-  if (b.n >= max) return true;
-  b.n++;
-  return false;
-}
+// Rate limiting, shared across serverless instances when KV is configured.
+// See rate-limit.js — async because the shared counter is a network round trip.
+const { rateLimited } = require('./rate-limit');
 function clientIp(req) {
   return String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
     || (req.socket && req.socket.remoteAddress) || 'unknown';
@@ -278,9 +270,32 @@ function authorizeKv(req, res, key, write) {
   return requireWalletOwner(req, res, keyOwnerAddr(key));
 }
 
+// Both proxies front StarkWare infrastructure and cost real resources — the prover
+// generates proofs, and each request can hold a function for up to maxDuration
+// (300s, see vercel.json). Until now the only thing in front of them was the
+// pre-launch Basic-Auth site gate; without it they would be open, unmetered compute
+// proxies on a public domain, reachable by anyone with curl.
+//
+// Requiring a session costs no legitimate flow: the SDK only builds these providers
+// inside createPrivacyClient, which needs a viewing key and a deployed payroll
+// contract, so every real caller has already signed in. The SDK sets no `credentials`
+// option, so its same-origin fetches send the session cookie by default.
+function gateProxy(name, max, windowMs) {
+  return async (req, res, next) => {
+    const s = readSession(req);
+    if (!s) return res.status(401).json({ error: 'wallet login required' });
+    if (await rateLimited(`${name}:${s.a}`, max, windowMs)) {
+      return res.status(429).json({ error: 'rate limited' });
+    }
+    next();
+  };
+}
+
 // Mixed-content proxies — must precede express.json so bodies stream raw.
-app.use('/api/discovery', streamProxy(DISCOVERY_UPSTREAM));
-app.use('/api/prover', streamProxy(PROVER_UPSTREAM));
+// Discovery is polled during history sweeps, so it gets a higher ceiling than the
+// prover, where each call is expensive.
+app.use('/api/discovery', gateProxy('discovery', 300, 60000), streamProxy(DISCOVERY_UPSTREAM));
+app.use('/api/prover', gateProxy('prover', 30, 60000), streamProxy(PROVER_UPSTREAM));
 
 app.use(express.json({ limit: '2mb' }));
 
@@ -297,8 +312,8 @@ app.use(express.static(path.join(__dirname, 'pripay')));
 
 // ── SIWS auth endpoints ──
 // 1) issue a short-lived, address-bound nonce for the wallet to sign.
-app.post('/api/auth/nonce', (req, res) => {
-  if (rateLimited('auth:' + clientIp(req), 30, 60000)) return res.status(429).json({ error: 'rate limited' });
+app.post('/api/auth/nonce', async (req, res) => {
+  if (await rateLimited('auth:' + clientIp(req), 30, 60000)) return res.status(429).json({ error: 'rate limited' });
   let addr;
   try { addr = toFelt((req.body || {}).address); } catch { return res.status(400).json({ error: 'bad address' }); }
   res.json({ nonce: signToken({ a: addr, t: Date.now(), r: crypto.randomBytes(12).toString('hex') }) });
@@ -309,7 +324,7 @@ app.post('/api/auth/nonce', (req, res) => {
 // only after checking the embedded nonce (ours, fresh, address-bound), the
 // domain, and the on-chain signature.
 app.post('/api/auth/verify', async (req, res) => {
-  if (rateLimited('auth:' + clientIp(req), 30, 60000)) return res.status(429).json({ error: 'rate limited' });
+  if (await rateLimited('auth:' + clientIp(req), 30, 60000)) return res.status(429).json({ error: 'rate limited' });
   const { address, signature, typedData } = req.body || {};
   let addr;
   try { addr = toFelt(address); } catch { return res.status(400).json({ error: 'bad address' }); }
@@ -445,6 +460,22 @@ const KINDS = new Set(['profiles', 'orders']);
 const collPath = (addr, kind) => `wallets/${encodeURIComponent(addr.toLowerCase())}/${kind}`;
 const recPath  = (addr, kind, id) => `${collPath(addr, kind)}/${encodeURIComponent(id)}`;
 
+// Per-wallet ceilings. The record id comes from the caller, so without these one
+// signed session can create unlimited documents of up to the whole JSON body limit
+// (2mb) each — turning a throwaway wallet into unbounded storage cost. Sepolia makes
+// that cheaper to attempt, not harder: testnet accounts are free and unlimited.
+//
+// Sized well above real use rather than tight:
+//   64 KiB  — a Profile is ~330 bytes plus ~130 per embedded Tx, so this holds
+//             roughly 25 years of monthly history on one contact.
+//   500     — at PAGE_SIZE 8 that is already 63 pages of UI, past the point the
+//             list views are usable, and far past any Sepolia pilot.
+//
+// This bounds damage per identity; it does not stop an attacker rotating wallets.
+// The backstop for that is a platform-level (WAF / global) limit, not this check.
+const MAX_RECORD_BYTES = 64 * 1024;
+const MAX_RECORDS_PER_KIND = 500;
+
 app.get('/api/wallet/:addr/:kind', async (req, res) => {
   if (!KINDS.has(req.params.kind)) return res.status(400).json({ error: 'unknown kind' });
   if (!requireWalletOwner(req, res, req.params.addr)) return;
@@ -460,8 +491,21 @@ app.get('/api/wallet/:addr/:kind', async (req, res) => {
 app.put('/api/wallet/:addr/:kind/:id', async (req, res) => {
   if (!KINDS.has(req.params.kind)) return res.status(400).json({ error: 'unknown kind' });
   if (!requireWalletOwner(req, res, req.params.addr)) return;
+  const { addr, kind, id } = req.params;
+  if (Buffer.byteLength(JSON.stringify(req.body ?? null)) > MAX_RECORD_BYTES) {
+    return res.status(413).json({ error: `record exceeds ${MAX_RECORD_BYTES} bytes` });
+  }
   try {
-    await store.setDoc(recPath(req.params.addr, req.params.kind, req.params.id), req.body);
+    // Only count when creating: an update to an existing record can't grow the
+    // collection, and this keeps the common path to a single read.
+    const docPath = recPath(addr, kind, id);
+    if (!(await store.getDoc(docPath))) {
+      const existing = await store.listDocs(collPath(addr, kind));
+      if (existing.length >= MAX_RECORDS_PER_KIND) {
+        return res.status(409).json({ error: `limit of ${MAX_RECORDS_PER_KIND} ${kind} reached` });
+      }
+    }
+    await store.setDoc(docPath, req.body);
     res.json({ ok: true });
   } catch (e) {
     console.warn('[api] record put failed:', e.message);
@@ -534,7 +578,7 @@ const AVNU_PAYMASTER_URL = process.env.AVNU_PAYMASTER_URL || 'https://sepolia.pa
 app.post('/api/paymaster', async (req, res) => {
   const s = readSession(req);
   if (!s) return res.status(401).json({ error: 'wallet login required' });
-  if (rateLimited('pm:' + s.a, 60, 60000)) return res.status(429).json({ error: 'rate limited' });
+  if (await rateLimited('pm:' + s.a, 60, 60000)) return res.status(429).json({ error: 'rate limited' });
   const apiKey = process.env.AVNU_PAYMASTER_API_KEY;
   if (!apiKey) return res.status(503).json({ error: 'paymaster not configured (AVNU_PAYMASTER_API_KEY)' });
   const method = req.body && req.body.method;

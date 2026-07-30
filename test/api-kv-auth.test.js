@@ -28,6 +28,9 @@ async function boot({ adminWallets = ADMIN_WALLET } = {}) {
   delete process.env.UPSTASH_REDIS_REST_URL;
   delete process.env.BASIC_AUTH_USER;
   delete process.env.BASIC_AUTH_PASS;
+  // local-store.js resolves its file path at module scope, so it must be evicted
+  // too, or every boot() silently reuses the first temp store.
+  delete require.cache[require.resolve('../local-store')];
   delete require.cache[require.resolve('../server')];
   const app = require('../server');
   const server = app.listen(0);

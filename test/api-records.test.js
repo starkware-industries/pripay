@@ -22,6 +22,9 @@ async function boot() {
   delete process.env.GOOGLE_CLOUD_PROJECT;
   delete process.env.BASIC_AUTH_USER;
   delete process.env.BASIC_AUTH_PASS;
+  // local-store.js resolves its file path at module scope, so it must be evicted
+  // too, or every boot() silently reuses the first temp store.
+  delete require.cache[require.resolve('../local-store')];
   delete require.cache[require.resolve('../server')];
   const app = require('../server');
   const server = app.listen(0);
@@ -95,5 +98,67 @@ test('rejects an unknown kind', async () => {
   const { server, base } = await boot();
   try {
     assert.strictEqual((await put(base, A, 'widgets', 'w1', { id: 'w1' }, sessionCookie(A))).status, 400);
+  } finally { server.close(); }
+});
+
+// Per-wallet ceilings. Without them a single signed session can create unlimited
+// documents (the id is caller-supplied) at up to the 2mb JSON body limit each.
+// Sepolia makes that cheaper to attempt, not harder — testnet accounts are free.
+test('a record larger than the cap is refused', async () => {
+  const { server, base } = await boot();
+  const cookieA = sessionCookie(A);
+  try {
+    const tooBig = { id: 'p1', notes: 'x'.repeat(64 * 1024) };
+    const r = await put(base, A, 'profiles', 'p1', tooBig, cookieA);
+    assert.strictEqual(r.status, 413);
+    assert.match((await r.json()).error, /exceeds/);
+    // ...and nothing was stored
+    assert.deepStrictEqual(await (await list(base, A, 'profiles', cookieA)).json(), []);
+  } finally { server.close(); }
+});
+
+test('a realistic record with years of history is comfortably under the cap', async () => {
+  const { server, base } = await boot();
+  const cookieA = sessionCookie(A);
+  try {
+    // 120 txs ~ 10 years of monthly payments on one contact.
+    const txs = Array.from({ length: 120 }, (_, i) => ({
+      date: '2026-07-30', type: 'transfer', amount: 12500.5, currency: 'USDC', tx: '0x' + 'a'.repeat(63),
+    }));
+    const r = await put(base, A, 'profiles', 'p1', { id: 'p1', name: 'Alice', addr: '0x' + 'b'.repeat(63), nis: 45000, txs }, cookieA);
+    assert.strictEqual(r.status, 200, 'a decade of history must not trip the size cap');
+  } finally { server.close(); }
+});
+
+test('the record count is capped, and updates still work at the ceiling', async () => {
+  const { server, base } = await boot();
+  const cookieA = sessionCookie(A);
+  try {
+    // Fill to the cap. Sequential because each create reads the collection.
+    for (let i = 0; i < 500; i++) {
+      const r = await put(base, A, 'orders', 'o' + i, { id: 'o' + i, nis: i }, cookieA);
+      assert.strictEqual(r.status, 200, `create ${i} should succeed below the cap`);
+    }
+    // One more NEW record is refused.
+    const over = await put(base, A, 'orders', 'o500', { id: 'o500' }, cookieA);
+    assert.strictEqual(over.status, 409);
+    assert.match((await over.json()).error, /limit of 500 orders/);
+
+    // But updating an existing record still works — it can't grow the collection.
+    const upd = await put(base, A, 'orders', 'o0', { id: 'o0', nis: 999 }, cookieA);
+    assert.strictEqual(upd.status, 200, 'updates must not be blocked by the count cap');
+
+    // And deleting frees a slot.
+    await fetch(`${base}/api/wallet/${A}/orders/o1`, { method: 'DELETE', headers: { cookie: cookieA } });
+    assert.strictEqual((await put(base, A, 'orders', 'o500', { id: 'o500' }, cookieA)).status, 200);
+  } finally { server.close(); }
+});
+
+test('the cap is per wallet, not global', async () => {
+  const { server, base } = await boot();
+  try {
+    await put(base, A, 'orders', 'o1', { id: 'o1' }, sessionCookie(A));
+    // B has its own budget.
+    assert.strictEqual((await put(base, B, 'orders', 'o1', { id: 'o1' }, sessionCookie(B))).status, 200);
   } finally { server.close(); }
 });
