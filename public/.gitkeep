@@ -1,0 +1,3 @@
+# Intentionally empty. Vercel's build requires an output directory to exist;
+# PriPay serves everything through the Express serverless function (see
+# vercel.json rewrites + api/index.js), so no static output is produced here.

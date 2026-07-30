@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PriPay</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script src="vendor/gsap.min.js" defer></script>
+</head>
+<body class="light">
+
+<!-- LOGIN GATE — full-screen overlay shown until a wallet is connected
+     (flow + look modeled on the AnomaPay login; wired by core/login-gate.ts) -->
+<div class="login-gate" id="loginGate">
+  <div class="lg-brand">
+    <span class="logo-text lg-logo">priPay</span>
+  </div>
+
+  <div class="lg-card">
+    <!-- the gate opens straight on the wallet chooser; hidden until JS populates
+         it so the empty chooser never flashes before the script runs -->
+    <div class="lg-view" id="lgViewWallets" hidden>
+      <div class="lg-eyebrow">Wallet log in</div>
+      <div class="lg-title">Choose your wallet</div>
+      <div class="lg-wallet-list" id="lgWalletList"></div>
+      <div id="lgErr" style="display:none"></div>
+    </div>
+
+    <!-- view 3: waiting on wallet approval -->
+    <div class="lg-view" id="lgViewConnecting" hidden>
+      <button class="lg-back" id="lgBackToWallets" aria-label="Back">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div class="lg-connecting">
+        <div class="lg-eyebrow">Almost there</div>
+        <div class="lg-title">Please sign on<br>your wallet</div>
+        <div class="lg-spinner" aria-hidden="true"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="lg-foot">PriPay · Testnet demo · Unaudited software</div>
+</div>
+
+<div class="shell">
+
+<!-- TESTNET NOTICE — persistent across every app page (first grid row of the
+     shell, so it never scrolls away). -->
+<div class="testnet-banner" role="status">⚠️ Testnet environment — for testing only. Do not use real funds.</div>
+
+<!-- TOPBAR — theme toggle · notifications · profile -->
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="logo-text app-logo">priPay</span>
+  </div>
+  <nav class="topnav">
+    <div class="nav-item active" data-page="dashboard">Dashboard</div>
+    <div class="nav-item" data-page="recurrent">Payroll</div>
+    <div class="nav-item" data-page="onetime">Send</div>
+    <div class="nav-item" data-page="profiles">People</div>
+    <div class="nav-item" data-page="audit">Transactions</div>
+  </nav>
+  <div class="topbar-right">
+    <button type="button" class="hbtn mode-btn" id="payModeToggle" title="Private mode — click to switch between private and public payments">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    </button>
+    <button class="profile-btn" id="profileBtn" title="Profile" aria-haspopup="dialog" aria-expanded="false" aria-label="Profile">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.6"/><path d="M5.5 20c0-3.6 2.9-6.5 6.5-6.5s6.5 2.9 6.5 6.5"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- PROFILE POPOVER (opens from the topbar avatar; filled by core/profile-pop.ts) -->
+<div class="profile-pop" id="profilePop" role="dialog" aria-label="Account">
+  <div class="pp-head">
+    <button class="pp-copy" id="ppCopyBtn" title="Copy wallet address">
+      <span id="ppAddr">0x…</span>
+      <svg class="pp-ico-copy" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      <svg class="pp-ico-done" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    </button>
+  </div>
+  <div class="pp-list">
+    <button class="pp-item" id="ppSettingsBtn"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>Settings</span></button>
+    <button class="pp-item" id="ppThemeBtn"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><span>Light / dark mode</span></button>
+    <button class="pp-item pp-danger" id="ppSignOutBtn"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg><span>Log out</span></button>
+  </div>
+</div>
+
+<!-- Global "set up private payments" nudge — lives outside the pages so it
+     stays visible on every screen until the treasury is activated. -->
+<div class="activate-alert" id="setupCard">
+  <button class="aa-close" id="setupDismiss" aria-label="Dismiss" title="Dismiss">×</button>
+  <div class="aa-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></div>
+  <div class="aa-body">
+    <div class="dotslot" id="ocDot" style="display:none"></div>
+    <div class="aa-title" id="ocStatus">Set up private payments</div>
+    <div class="aa-sub" id="ocSub">One-time activation · takes about a minute</div>
+    <button id="onboardBtn" class="btn btn-p btn-sm" style="display:none;margin-top:10px">Activate private payments</button>
+  </div>
+</div>
+
+<main class="main">
+
+<!-- ══ DASHBOARD ══ -->
+<div class="page active" id="page-dashboard">
+
+  <!-- Shown when no wallet is connected (rare — the login gate covers this). -->
+  <div id="dashConnectPrompt" class="hidden" style="background:var(--panel);border:1px solid var(--border);border-radius:var(--r2);padding:48px 24px;text-align:center">
+    <div style="font-size:15px;font-weight:500;margin-bottom:6px">Connect your wallet</div>
+    <div style="font-size:13px;color:var(--text3)">Your balance, payroll and activity appear once a wallet is connected.</div>
+  </div>
+
+  <div class="dash-noir" id="dashStats">
+
+    <!-- Head: title + activation status (hidden once active) -->
+    <div class="dash-head" style="justify-content:flex-end">
+    </div>
+    <div id="onboardErr" style="display:none"></div>
+
+    <!-- Stat cards -->
+    <div class="stat4">
+      <div class="scard">
+        <div class="s-top"><span class="s-lbl">Total balance</span>
+          <button class="hb-eye" id="balEyeBtn" title="Hide amounts" aria-label="Hide amounts"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        </div>
+        <div class="s-val" id="dashTotalNis">—</div>
+        <div class="s-sub" id="dashTreasurySub">Connect wallet to view</div>
+      </div>
+      <div class="scard">
+        <div class="s-top"><span class="s-lbl">Monthly payroll</span></div>
+        <div class="s-val" id="dashPayrollNis">—</div>
+        <div class="s-sub" id="dashPayrollSub">—</div>
+      </div>
+      <div class="scard">
+        <div class="s-top"><span class="s-lbl">Team</span></div>
+        <div class="s-val" id="dashProfileCount">—</div>
+        <div class="s-sub">people you pay</div>
+      </div>
+      <div class="scard">
+        <div class="s-top"><span class="s-lbl">Payments this month</span><span class="trend-chip" id="dashMonthTrend" style="display:none"></span></div>
+        <div class="s-val" id="dashMonthTx">—</div>
+        <div class="s-sub" id="dashMonthTxSub">across all types</div>
+      </div>
+    </div>
+
+    <!-- Balance + payments-over-time chart -->
+    <div class="two-col">
+      <div class="card">
+        <div class="ch">
+          <div class="ct" style="font-size:15px">Balance</div>
+          <div class="bal-actions">
+            <button class="icon-btn" id="refreshTreasuryBtn" title="Refresh balance" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+            <button class="btn btn-s btn-sm" id="withdrawBtn" style="display:none">Withdraw</button>
+            <button class="btn btn-s btn-sm navlink" data-page="onetime">Send</button>
+            <button class="btn btn-p btn-sm" id="depositBtn" style="display:none">Deposit</button>
+          </div>
+        </div>
+        <div class="cb" style="display:flex;flex-direction:column;justify-content:center">
+          <div id="balDonut"></div>
+          <div id="balContractRow" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+              <span class="rowlbl" title="Funds paused mid-deposit — move them onward or back">On hold</span>
+              <span class="cell" id="bal-c-usdc" style="font-size:12px;color:var(--text3)"></span>
+              <span class="cell" id="bal-c-strk" style="font-size:12px;color:var(--text3)"></span>
+              <span class="cell" id="bal-c-eth" style="font-size:12px;color:var(--text3)"></span>
+              <span style="margin-left:auto;display:flex;gap:6px">
+                <button id="contractShieldBtn" class="btn btn-s btn-xs" title="Finish moving these funds into your private balance">Deposit</button>
+                <button id="contractWithdrawBtn" class="btn btn-s btn-xs" title="Return these funds to your wallet">To wallet</button>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="ch"><div class="ct" style="font-size:15px">Payments over time</div></div>
+        <div class="chart-body" id="payChart"></div>
+      </div>
+    </div>
+
+    <!-- Team + top recipients -->
+    <div class="two-col">
+      <div class="card">
+        <div class="ch"><div class="ct" style="font-size:15px">Your team</div><button class="view-all navlink" data-page="profiles">View All</button></div>
+        <div class="team-grid" id="teamGrid"></div>
+      </div>
+      <div class="card">
+        <div class="ch"><div class="ct" style="font-size:15px">Top recipients</div><button class="view-all navlink" data-page="audit">View All</button></div>
+        <div style="padding:0 0 6px;overflow-y:auto;flex:1;min-height:0;border-radius:0 0 var(--r2) var(--r2)">
+          <table class="tbl">
+            <thead><tr><th>Name</th><th>Payments</th><th>Total</th></tr></thead>
+            <tbody id="topRecipients"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══ PROFILES ══ -->
+<div class="page" id="page-profiles">
+  <div class="ph" style="justify-content:flex-start">
+    <input class="inp" id="profileSearch" placeholder="Search by name or address…" style="flex:1;min-width:200px;max-width:340px">
+    <button class="btn btn-s btn-sm" id="profileClearBtn">Clear</button>
+    <div class="cur-row" style="margin:0;display:flex;gap:6px;margin-left:auto" id="profileTypeFilter">
+      <div class="cur-pill active" data-ptype="all">All</div>
+      <div class="cur-pill" data-ptype="Employee">Employees</div>
+      <div class="cur-pill" data-ptype="Contractor">Contractors</div>
+      <div class="cur-pill" data-ptype="Vendor">Vendors</div>
+      <div class="cur-pill" data-ptype="Advisor">Advisors</div>
+    </div>
+    <input type="file" id="abCsvFile" accept=".csv" style="display:none">
+  </div>
+
+  <div class="card fill-col">
+    <div class="ch">
+      <div class="ct">People</div><span class="badge b-blue" id="profileCountBadge">0 people</span>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn btn-s btn-sm" id="profileBulkRemoveBtn" style="display:none;color:var(--danger)">Delete selected</button>
+        <button class="btn btn-s btn-sm" id="importAbCsvBtn">Import CSV</button>
+        <button class="btn btn-s btn-sm" id="exportPeopleBtn">Export CSV</button>
+        <button class="btn btn-p btn-sm" id="addProfileBtn">Add person</button>
+      </div>
+    </div>
+    <div class="fill-scroll" style="padding:0">
+      <table class="tbl">
+        <thead><tr><th class="check-col"><input type="checkbox" class="row-check" id="profileSelectAll" title="Select all"></th><th>Name</th><th>Address</th><th>Type</th><th>Monthly total ($)</th><th>Notes</th><th>Payments</th><th></th></tr></thead>
+        <tbody id="profileGrid"></tbody>
+      </table>
+    </div>
+    <div class="pager" id="profilePager" style="display:none"></div>
+  </div>
+</div>
+
+<!-- Profile detail modal — top-level so it opens from any page (People, Payroll…). -->
+<div class="moverlay" id="modal-profileDetail">
+    <div class="modal" style="max-width:920px;width:94%;max-height:88vh;display:flex;flex-direction:column">
+      <div class="ch">
+        <div class="ct" id="pdName">—</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-left:auto">
+          <div id="pdViewActions" style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-s btn-sm" id="goOneTimeBtn">Send</button>
+            <button class="btn btn-s btn-sm" id="addToRecurrentBtn">Add order</button>
+            <button class="btn btn-s btn-sm" id="pdEditBtn">Edit profile</button>
+          </div>
+          <div id="pdEditActions" style="display:none;flex-direction:column;align-items:flex-end;gap:6px">
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-s btn-sm" id="pdCancelEditBtn">Cancel</button>
+              <button class="btn btn-p btn-sm" id="pdSaveEditBtn">Save</button>
+            </div>
+            <div id="pdEditErr" style="display:none;font-size:11px;color:var(--danger)"></div>
+          </div>
+          <button class="icon-btn" id="pdCloseBtn" title="Close" aria-label="Close" style="font-size:15px;line-height:1;padding:6px 9px">✕</button>
+        </div>
+      </div>
+      <div class="cb" style="gap:18px;overflow-y:auto">
+        <div class="grid3">
+          <div><div class="lbl">Address</div><div style="font-size:12px;color:var(--text2);margin-top:5px" id="pdAddr">—</div></div>
+          <div><div class="lbl">Total sent</div><div style="font-size:14px;font-weight:500;color:var(--accent);margin-top:5px" id="pdTotal">—</div></div>
+          <div><div class="lbl">Type</div><div style="font-size:13px;font-weight:500;margin-top:5px" id="pdType">—</div></div>
+          <div><div class="lbl">Email</div><div style="font-size:13px;font-weight:500;margin-top:5px" id="pdEmail">—</div></div>
+          <div><div class="lbl">Default transfer mode</div><div style="font-size:13px;font-weight:500;margin-top:5px" id="pdMode">—</div></div>
+          <div style="grid-column:span 3"><div class="lbl">Notes</div><div style="font-size:13px;color:var(--text3);margin-top:5px" id="pdNotes">—</div></div>
+        </div>
+        <div>
+          <div class="lbl" style="margin-bottom:10px">Transaction history</div>
+          <div style="border-radius:var(--r);border:1px solid var(--border);max-height:280px;overflow-y:auto">
+            <table class="tbl"><thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Value</th><th>TX ID</th><th></th></tr></thead><tbody id="pdTxTable"></tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<!-- ══ RECURRENT ══ -->
+<div class="page" id="page-recurrent">
+  <div class="ph" style="justify-content:flex-start">
+    <div class="cur-row" style="margin:0;display:flex;gap:6px;margin-left:auto" id="recStatusFilter">
+      <div class="cur-pill active" data-rec-status="all">All</div>
+      <div class="cur-pill" data-rec-status="active">Active only</div>
+      <div class="cur-pill" data-rec-status="inactive">Inactive only</div>
+    </div>
+  </div>
+  <div id="executeStatus" style="display:none"></div>
+  <div id="executeShortfall" style="display:none;font-size:12px;color:var(--danger);background:var(--danger-bg);border:1px solid #fecaca;border-radius:6px;padding:8px 12px;margin-bottom:10px;line-height:1.5"></div>
+  <div class="card fill-col">
+    <div class="ch">
+      <div class="ct">Payroll <span style="color:var(--text3);font-weight:400" id="recCount">(3)</span></div>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn btn-s btn-sm" id="recBulkToggleBtn" style="display:none">Deactivate selected</button>
+        <button class="btn btn-s btn-sm" id="recBulkRemoveBtn" style="display:none;color:var(--danger)">Delete selected</button>
+        <button class="btn btn-s btn-sm" id="addOrderBtn">Add order</button>
+        <button class="btn btn-s btn-sm" id="recImportCsvBtn">Import CSV</button>
+        <button class="btn btn-s btn-sm" id="exportCsvBtn">Export CSV</button>
+        <button class="btn btn-p btn-sm" id="executeAllBtn" disabled style="opacity:0.45;cursor:not-allowed"><span id="executeAllLabel">Execute</span></button>
+      </div>
+    </div>
+    <div class="fill-scroll" style="padding:0">
+      <table class="tbl">
+        <thead><tr><th class="check-col"><input type="checkbox" class="row-check" id="recSelectAll" title="Select all"></th><th>Name</th><th>Amount ($)</th><th>Repeats</th><th>Next payment</th><th>Status</th><th></th></tr></thead>
+        <tbody id="recTable"></tbody>
+      </table>
+    </div>
+    <div class="pager" id="recPager" style="display:none"></div>
+  </div>
+</div>
+
+<!-- ══ IMPORT CSV MODAL ══ -->
+<div class="moverlay" id="modal-importCsv">
+  <div class="modal" style="max-width:720px;width:95%">
+    <div class="mh"><div class="mt">Import CSV</div><button class="mc" data-close-modal="importCsv">×</button></div>
+    <div class="mb" style="display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;gap:16px;align-items:flex-start">
+        <div class="dropzone" id="dropzone" style="flex:1;min-width:0">
+                    <div style="font-size:13px;font-weight:500;color:var(--text2)">Drop CSV file or click to browse</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:4px">columns: is shielded? · token · address · amount · currency · note · max 2MB</div>
+          <input type="file" id="csvFile" accept=".csv" style="display:none">
+        </div>
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:8px">
+          <div style="background:var(--bg3);border-radius:var(--r);padding:10px 12px;font-family:monospace;font-size:11px;color:var(--text2);line-height:1.7">
+            is shielded?,token,address,amount,currency,note<br>
+            <span style="color:var(--text3)">yes,usdc,0xabcd...0001,1000,ils,Sample row</span><br>
+            <span style="color:var(--text3)">no,strk,0xabcd...0002,500,usd,</span>
+          </div>
+          <button class="btn btn-s" id="downloadPayrollTemplateBtn" type="button" style="align-self:flex-start;font-size:12px">Download template (.csv)</button>
+        </div>
+      </div>
+      <div id="csvFeedback" style="display:none"></div>
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:13px;font-weight:500;color:var(--text1)">Review <span style="color:var(--text3);font-weight:400" id="csvCountLabel">(0 rows)</span></span>
+          <span style="font-size:12px" id="csvValidNote"></span>
+        </div>
+        <div style="max-height:360px;overflow:auto;border-radius:var(--r);border:1px solid var(--border)">
+          <table class="tbl" style="width:100%">
+            <thead><tr><th>#</th><th title="Private payment">Private</th><th>Token</th><th>Address</th><th>Amount</th><th>Note</th><th>Profile</th><th></th></tr></thead>
+            <tbody id="csvPreview"><tr><td colspan="8" style="text-align:center;color:var(--text3);font-size:12px;padding:24px">No file loaded</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="importStatus" style="display:none"></div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-s" data-close-modal="importCsv">Cancel</button>
+      <button class="btn btn-p" id="importDoneBtn" disabled>Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ IMPORT PROFILES CSV MODAL ══ -->
+<div class="moverlay" id="modal-importProfilesCsv">
+  <div class="modal" style="max-width:680px;width:95%">
+    <div class="mh"><div class="mt">Import people</div><button class="mc" data-close-modal="importProfilesCsv">×</button></div>
+    <div class="mb" style="display:flex;flex-direction:column;gap:16px">
+      <div class="dropzone" id="abDropzone">
+        <div style="font-size:14px;font-weight:500;color:var(--text2)">Drop CSV file or click to browse</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px">columns: name · address · email · type · notes · max 2MB</div>
+        <input type="file" id="abCsvFile" accept=".csv" style="display:none">
+      </div>
+      <div id="abCsvFeedback" style="display:none"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+        <span style="font-size:13px;font-weight:500;color:var(--text1)">Review <span style="color:var(--text3);font-weight:400" id="abCsvCountLabel">(0 rows)</span> <span style="font-size:12px;margin-left:6px" id="abCsvValidNote"></span></span>
+        <button class="btn btn-s" id="downloadProfilesTemplateBtn" type="button" style="font-size:12px">Download template (.csv)</button>
+      </div>
+      <div style="max-height:280px;overflow-y:auto;border-radius:var(--r);border:1px solid var(--border)">
+        <table class="tbl">
+          <thead><tr><th>#</th><th>Name</th><th>Address</th><th>Email</th><th>Type</th><th>Notes</th></tr></thead>
+          <tbody id="abCsvPreview"><tr><td colspan="6" style="text-align:center;color:var(--text3);font-size:12px;padding:24px">No file loaded</td></tr></tbody>
+        </table>
+      </div>
+      <div id="abImportStatus" style="display:none"></div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-s" data-close-modal="importProfilesCsv">Cancel</button>
+      <button class="btn btn-p" id="abImportDoneBtn" disabled>Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ ONE-TIME ══ -->
+<div class="page" id="page-onetime">
+  <div class="ph"></div>
+  <div class="split fill">
+    <div class="card fill-col">
+      <div class="ch"><div class="ct">Transfer details</div></div>
+      <div class="cb fill-scroll" style="display:flex;flex-direction:column;gap:16px">
+        <div class="fg">
+          <div class="lbl">Recipient</div>
+          <div id="otRecipientTag" style="display:none"></div>
+          <div id="otManualAddr" style="display:flex;gap:8px">
+            <input class="inp" id="otAddr" placeholder="0x04..." style="flex:1">
+            <button class="btn btn-s btn-sm" id="pickNameBtn" style="white-space:nowrap">Choose from People</button>
+          </div>
+          <div id="otAddrErr" style="font-size:12px;color:var(--danger);display:none">Invalid Starknet address</div>
+        </div>
+        <!-- Mode comes from the header Private/Public toggle; the pills
+             stay in the DOM (hidden) as the state the send flow reads. -->
+        <div class="fg" style="display:none" aria-hidden="true">
+          <div id="otModePills" class="cur-row" style="margin:0;display:flex;gap:6px">
+            <div class="cur-pill active" data-mode="shielded">Private</div>
+            <div class="cur-pill" data-mode="unshielded">Public</div>
+          </div>
+        </div>
+        <div class="fg">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="fg">
+              <div class="lbl">Amount</div>
+              <div class="nis-group">
+                <input class="nis-input" id="otCryptoAmt" type="number" step="any" placeholder="0">
+                <select id="otAmountUnit" class="amount-unit" title="Currency you're typing the amount in">
+                  <option value="usdc">$ USD</option>
+                  <option value="nis">₪ ILS</option>
+                  <option value="strk">STRK</option>
+                  <option value="eth">ETH</option>
+                </select>
+              </div>
+            </div>
+            <div class="fg">
+              <div class="lbl">Transferred amount</div>
+              <div class="nis-group readonly-group">
+                <input class="nis-input" id="otSendAmt" type="text" placeholder="0" readonly tabindex="-1">
+                <select id="otSendCurrency" class="amount-unit" title="Currency sent on-chain">
+                  <option value="usdc">USDC</option>
+                  <option value="strk">STRK</option>
+                  <option value="eth">ETH</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div id="otShieldedBal" style="display:none;font-size:11px;margin-top:6px;line-height:1.4"></div>
+        </div>
+        <div class="fg">
+          <div class="lbl">Description <span style="color:var(--text3);font-weight:400">(optional)</span></div>
+          <input class="inp" id="otDesc" placeholder="e.g. Bonus payment, Consulting fee…">
+        </div>
+      </div>
+    </div>
+    <div class="col fill-col">
+      <div class="card">
+        <div class="ch"><div class="ct">Summary</div></div>
+        <div class="cb" style="display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--text2)">To</span><span id="otSumAddr" style="font-size:12px;color:var(--text3)">—</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--text2)">Mode</span><span id="otSumMode" style="font-weight:500">—</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:13px;align-items:baseline"><span style="color:var(--text2)">Amount</span><span style="display:inline-flex;gap:6px;align-items:baseline"><span id="otSumCrypto" style="color:var(--text3)">—</span><span id="otSumNis" style="color:var(--text3);font-size:12px;display:none"></span></span></div>
+          <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--text2)" title="What the last payment's network fee was — shown as a guide">Recent fee</span><span id="otSumGas" style="color:var(--text3)">—</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--text2)">Description</span><span id="otSumDesc" style="font-size:12px;color:var(--text3);text-align:right;max-width:160px">—</span></div>
+        </div>
+        <div style="padding:0 22px 18px">
+          <div id="otStatus" style="display:none;margin-bottom:10px"></div>
+          <button class="btn btn-p" style="width:100%;justify-content:center" id="otBtn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+            Send transfer
+          </button>
+          <div id="otShieldedBalSummary" style="display:none;font-size:12px;color:var(--danger);background:var(--danger-bg);border:1px solid #fecaca;border-radius:6px;padding:8px 12px;margin-top:10px;line-height:1.4"></div>
+        </div>
+      </div>
+      <div class="card fill-col">
+        <div class="ch"><div class="ct">Recent transfers</div></div>
+        <div class="fill-scroll" style="padding:0">
+          <table class="tbl">
+            <thead><tr><th>Date</th><th>To</th><th>Amount</th></tr></thead>
+            <tbody id="otHistory"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ AUDIT ══ -->
+<div class="page" id="page-audit">
+  <div class="ph" style="justify-content:flex-start">
+    <input class="inp" id="auditFilter" placeholder="Search by name, address or TX ID…" style="flex:1;min-width:200px;max-width:340px">
+    <button class="btn btn-s btn-sm" id="auditClearBtn">Clear</button>
+    <div class="cur-row" style="margin:0;display:flex;gap:6px;margin-left:auto" id="auditTypeFilter">
+      <div class="cur-pill active" data-audit-type="all">All</div>
+      <div class="cur-pill" data-audit-type="sent">Outgoing</div>
+      <div class="cur-pill" data-audit-type="OneTime">Send</div>
+      <div class="cur-pill" data-audit-type="Recurrent">Payroll</div>
+      <div class="cur-pill" data-audit-type="received">Incoming</div>
+      <div class="cur-pill" data-audit-type="Deposit">Deposits</div>
+      <div class="cur-pill" data-audit-type="Withdraw">Unshields</div>
+      <div class="cur-pill" data-audit-type="Convert">Converts</div>
+    </div>
+  </div>
+  <div class="col fill-col">
+    <div class="card fill-col">
+      <div class="ch"><div class="ct">Transactions</div><span class="badge b-blue" id="auditCount">0 records</span><span id="auditLoading" style="display:none;align-items:center;gap:6px;margin-left:8px;font-size:11px;color:var(--text3)"><span class="spin" style="width:12px;height:12px;border-width:2px"></span>Loading…</span><div style="margin-left:auto;display:flex;gap:8px"><button class="btn btn-s btn-sm" id="generateInvoiceBtn" disabled style="opacity:0.45;cursor:not-allowed">Invoice</button><button class="btn btn-s btn-sm" id="exportAuditBtn">Export CSV</button></div></div>
+      <div class="fill-scroll" style="padding:0">
+        <table class="tbl">
+          <thead><tr><th>Date</th><th>Type</th><th>Name</th><th>Address</th><th>Amount</th><th></th></tr></thead>
+          <tbody id="auditTable"></tbody>
+        </table>
+      </div>
+      <div class="pager" id="auditPager" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SETTINGS ══ -->
+<div class="page" id="page-settings">
+  <div class="col">
+    <div class="company-card" id="companyCard" style="max-width:620px"></div>
+    <div class="card js-admin-only" style="max-width:620px">
+      <div class="ch"><div class="ct">Paymaster account</div></div>
+      <div class="cb" style="display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:12px;color:var(--text3);line-height:1.5">
+          PriPay submits the final on-chain transaction through a paymaster account that pays the network fee. The private key is held in memory only and is re-entered after every reload.
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:13px;font-weight:500">Status</span>
+          <span id="setPmStatus" style="font-size:13px;font-weight:500;color:var(--text3)">Not configured</span>
+        </div>
+        <div id="setPmAddr" style="display:none;font-size:12px;font-family:monospace;color:var(--text2);word-break:break-all"></div>
+        <div style="display:flex;align-items:center;gap:14px">
+          <button class="btn btn-p btn-sm" id="setPmBtn">Set paymaster key</button>
+          <a href="#" id="setPmClear" style="display:none;font-size:12px;color:var(--err);text-decoration:underline;cursor:pointer">Clear</a>
+        </div>
+      </div>
+    </div>
+    <div class="card hidden" id="adminWalletsCard" style="max-width:620px">
+      <div class="ch"><div class="ct">Registered wallets</div></div>
+      <div class="cb" style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-size:12px;color:var(--text3);line-height:1.5">
+          Every wallet that has connected to PriPay. As an admin you can edit any wallet's company overview.
+        </div>
+        <div id="adminWalletsList" style="display:flex;flex-direction:column;gap:8px"></div>
+      </div>
+    </div>
+    <div class="card js-admin-only" style="max-width:620px">
+      <div class="ch"><div class="ct">Wallet connection test</div></div>
+      <div class="cb" style="display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:12px;color:var(--text3);line-height:1.5">
+          Asks the connected wallet to sign an off-chain SNIP-12 typed message (<code>"hello"</code>). This is a connectivity demo — nothing is sent on-chain and no funds move.
+        </div>
+        <div style="display:flex;align-items:center;gap:14px">
+          <button class="btn btn-p btn-sm" id="setSignDemoBtn">Sign hello message</button>
+        </div>
+        <div id="setSignDemoResult" style="display:none;font-size:12px;font-family:monospace;color:var(--text2);word-break:break-all;white-space:pre-wrap"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</main>
+</div>
+
+<!-- ADD PROFILE MODAL -->
+<div class="moverlay" id="modal-addProfile">
+  <div class="modal">
+    <div class="mh"><div class="mt">Add person</div><button class="mc" data-close-modal="addProfile">×</button></div>
+    <div class="mb">
+      <div class="grid2">
+        <div class="fg"><div class="lbl">Full name</div><input class="inp" id="npName" placeholder="e.g. John Doe"></div>
+        <div class="fg"><div class="lbl">Type</div><select class="sel" id="npType"><option value="">Select</option><option>Employee</option><option>Contractor</option><option>Vendor</option><option>Advisor</option></select></div>
+      </div>
+      <div class="fg"><div class="lbl">Starknet address</div><input class="inp" id="npAddr" placeholder="0x04..."></div>
+      <div class="fg">
+        <div class="lbl">Default transfer mode</div>
+        <select class="sel" id="npMode">
+          <option value="shielded">Private (recommended)</option>
+          <option value="unshielded">Public (regular transfer)</option>
+        </select>
+      </div>
+      <div class="fg"><div class="lbl">Email <span style="color:var(--text3);font-weight:400">(optional)</span></div><input class="inp" id="npEmail" placeholder="e.g. alice@example.com"></div>
+      <div class="fg"><div class="lbl">Notes</div><textarea class="inp" id="npNotes" rows="2" placeholder="Optional notes…" style="resize:vertical;min-height:56px"></textarea></div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-s" data-close-modal="addProfile">Cancel</button>
+      <button class="btn btn-p" id="saveProfileBtn">Save profile</button>
+    </div>
+  </div>
+</div>
+
+<!-- EDIT RECURRENT MODAL -->
+<div class="moverlay" id="modal-editOrder">
+  <div class="modal" style="max-width:600px">
+    <div class="mh"><div class="mt">Edit order</div><button class="mc" data-close-modal="editOrder">×</button></div>
+    <div class="mb">
+      <div id="eoPickerSection" style="display:none">
+        <button class="btn btn-p" id="eoPickNameBtn" type="button" style="width:100%;justify-content:center;font-weight:500;margin-bottom:14px">Choose recipient from People</button>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:1px">
+          <div style="flex:1;height:1px;background:var(--border)"></div>
+          <span>or enter manually</span>
+          <div style="flex:1;height:1px;background:var(--border)"></div>
+        </div>
+        <div class="fg"><div class="lbl">Full name</div><input class="inp" id="eoName" placeholder="e.g. John Doe"></div>
+        <div class="fg" style="margin-top:14px"><div class="lbl">Starknet address</div><input class="inp" id="eoAddr" placeholder="0x04..." style="font-family:monospace;font-size:12px"></div>
+      </div>
+      <div id="eoRecipientCard" style="margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:12px;padding:14px;background:var(--surface2);border:1px solid var(--border);border-radius:10px">
+          <div class="avatar" id="eoRecipientAv" style="width:40px;height:40px;font-size:14px;flex-shrink:0">—</div>
+          <div style="flex:1;min-width:0">
+            <div id="eoRecipientName" style="font-size:14px;font-weight:500;color:var(--text1);margin-bottom:2px">—</div>
+            <div id="eoRecipientAddr" style="font-family:monospace;font-size:11px;color:var(--text3);word-break:break-all">—</div>
+          </div>
+          <button class="icon-btn" id="eoRecipientClearBtn" type="button" title="Choose someone else" style="flex-shrink:0">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="fg">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>
+            <div class="lbl">Amount</div>
+            <div class="nis-group">
+              <input class="nis-input" id="eoAmount" type="number" step="any" placeholder="0">
+              <select id="eoAmountUnit" class="amount-unit" title="Currency you're typing the amount in">
+                <option value="usdc">$ USD</option>
+                <option value="nis">₪ ILS</option>
+                <option value="strk">STRK</option>
+                <option value="eth">ETH</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <div class="lbl">Transferred amount</div>
+            <div class="nis-group readonly-group">
+              <input class="nis-input" id="eoSendAmt" type="text" placeholder="0" readonly tabindex="-1">
+              <select id="eoSendCurrency" class="amount-unit" title="Currency sent on-chain">
+                <option value="usdc">USDC</option>
+                <option value="strk">STRK</option>
+                <option value="eth">ETH</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="grid2">
+        <div class="fg" style="display:none"><div class="lbl">Mode</div><select class="sel" id="eoMode"><option value="shielded">Private</option><option value="unshielded">Public</option></select></div>
+        <div class="fg"><div class="lbl">Repeats</div><select class="sel" id="eoPeriod"><option>Monthly</option><option>Biweekly</option><option>Weekly</option></select></div>
+      </div>
+      <div class="fg"><div class="lbl">Description</div><input class="inp" id="eoDescription" placeholder="e.g. Engineering"></div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-s" data-close-modal="editOrder">Cancel</button>
+      <button class="btn btn-p" id="saveOrderBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ADD ORDER MODAL -->
+<div class="moverlay" id="modal-addOrder">
+  <div class="modal form-sheet" style="max-width:600px">
+    <div class="mh"><div><div class="mt">Add order</div><div class="mst">Set up a recurring salary.</div></div><button class="mc" data-close-modal="addOrder">×</button></div>
+    <div class="mb">
+      <!-- Pick button — shown only when no recipient is chosen yet. -->
+      <div id="aoPickerSection">
+        <button class="btn btn-p" id="aoPickNameBtn" type="button" style="width:100%;justify-content:center;font-weight:500;margin-bottom:14px">Choose recipient from People</button>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:1px">
+          <div style="flex:1;height:1px;background:var(--border)"></div>
+          <span>or enter manually</span>
+          <div style="flex:1;height:1px;background:var(--border)"></div>
+        </div>
+        <div class="fg"><div class="lbl">Full name</div><input class="inp" id="aoName" placeholder="e.g. John Doe"></div>
+        <div class="fg" style="margin-top:14px"><div class="lbl">Starknet address</div><input class="inp" id="aoAddr" placeholder="0x04..." style="font-family:monospace;font-size:12px"></div>
+      </div>
+
+      <!-- Chosen-recipient card — shown after a profile is picked. -->
+      <div id="aoRecipientCard" style="display:none;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:12px;padding:14px;background:var(--surface2);border:1px solid var(--border);border-radius:10px">
+          <div class="avatar" id="aoRecipientAv" style="width:40px;height:40px;font-size:14px;flex-shrink:0">—</div>
+          <div style="flex:1;min-width:0">
+            <div id="aoRecipientName" style="font-size:14px;font-weight:500;color:var(--text1);margin-bottom:2px">—</div>
+            <div id="aoRecipientAddr" style="font-family:monospace;font-size:11px;color:var(--text3);word-break:break-all">—</div>
+          </div>
+          <button class="icon-btn" id="aoRecipientClearBtn" type="button" title="Choose someone else" style="flex-shrink:0">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="fg">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>
+            <div class="lbl">Amount</div>
+            <div class="nis-group">
+              <input class="nis-input" id="aoAmount" type="number" step="any" placeholder="0">
+              <select id="aoAmountUnit" class="amount-unit" title="Currency you're typing the amount in">
+                <option value="usdc">$ USD</option>
+                <option value="nis">₪ ILS</option>
+                <option value="strk">STRK</option>
+                <option value="eth">ETH</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <div class="lbl">Transferred amount</div>
+            <div class="nis-group readonly-group">
+              <input class="nis-input" id="aoSendAmt" type="text" placeholder="0" readonly tabindex="-1">
+              <select id="aoSendCurrency" class="amount-unit" title="Currency sent on-chain">
+                <option value="usdc">USDC</option>
+                <option value="strk">STRK</option>
+                <option value="eth">ETH</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Mode comes from the header Private/Public toggle; the hidden
+           select still carries the value the save flow reads. -->
+      <select id="aoTransferMode" style="display:none" aria-hidden="true">
+        <option value="shielded">Private</option>
+        <option value="unshielded">Public</option>
+      </select>
+      <div class="fg"><div class="lbl">Repeats</div><select class="sel" id="aoPeriod"><option>Monthly</option><option>Biweekly</option><option>Weekly</option></select></div>
+      <div class="fg"><div class="lbl">Description</div><input class="inp" id="aoDescription" placeholder="e.g. Engineering"></div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-s" data-close-modal="addOrder">Cancel</button>
+      <button class="btn btn-p" id="saveNewOrderBtn">Add order</button>
+    </div>
+  </div>
+</div>
+
+<!-- PICK PROFILE MODAL -->
+<!-- GENERIC ALERT MODAL -->
+<div class="moverlay" id="modal-alert">
+  <div class="modal" style="max-width:400px">
+    <div class="mh"><div class="mt" id="alertTitle">Notice</div><button class="mc" data-close-modal="alert" id="alertCloseX">×</button></div>
+    <div class="mb">
+      <div id="alertMessage" style="font-size:13px;line-height:1.5;color:var(--text2);white-space:pre-line"></div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-p" id="alertOkBtn">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- GENERIC CONFIRM MODAL -->
+<div class="moverlay" id="modal-confirm">
+  <div class="modal" style="max-width:440px">
+    <div class="mh"><div class="mt" id="confirmTitle">Confirm</div><button class="mc" data-close-modal="confirm" id="confirmCancelX">×</button></div>
+    <div class="mb">
+      <div id="confirmMessage" style="font-size:13px;line-height:1.5;color:var(--text2);white-space:pre-line"></div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-s" id="confirmCancelBtn">Cancel</button>
+      <button class="btn btn-p" id="confirmOkBtn">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- COMPLETE IMPORTED PROFILES MODAL -->
+<div class="moverlay" id="modal-completeImportedProfiles">
+  <div class="modal modal-xl">
+    <div class="mh">
+      <div class="mt">Complete imported profiles</div>
+      <button class="mc" data-close-modal="completeImportedProfiles">×</button>
+    </div>
+    <div class="mb">
+      <div style="font-size:13px;color:var(--text2);margin-bottom:12px;line-height:1.5">
+        <span id="cipCount">0</span> new profile(s) were created for addresses found in the CSV. Add a name and contact details so they're easier to recognize.
+      </div>
+      <div style="max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r)">
+        <table class="tbl">
+          <thead><tr><th>#</th><th>Address</th><th>Name</th><th>Email</th><th>Type</th><th>Default transfer type</th><th>Notes</th></tr></thead>
+          <tbody id="cipRows"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-s" data-close-modal="completeImportedProfiles">Skip</button>
+      <button class="btn btn-p" id="cipSaveBtn">Save details</button>
+    </div>
+  </div>
+</div>
+
+<!-- REMOVE PROFILE CONFIRM MODAL -->
+<div class="moverlay" id="modal-removeProfile">
+  <div class="modal" style="max-width:360px">
+    <div class="mh"><div class="mt">Are you sure?</div><button class="mc" data-close-modal="removeProfile">×</button></div>
+    <div class="mb">
+      <div style="font-size:13px;line-height:1.5;color:var(--text2)">
+        Remove <span id="rmProfileName" style="font-weight:500;color:var(--text1)">—</span> from the address book?
+      </div>
+      <div id="rmProfileOrdersNote" style="display:none;font-size:12px;color:var(--danger);background:var(--danger-bg);border:1px solid #fecaca;border-radius:6px;padding:8px 12px;margin-top:10px;line-height:1.45"></div>
+      <div style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.45">
+        This only removes them from your list — nothing changes for the recipient.
+      </div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-s" data-close-modal="removeProfile">Cancel</button>
+      <button class="btn btn-p" id="rmProfileConfirmBtn" style="background:var(--danger);border-color:var(--danger)">Remove</button>
+    </div>
+  </div>
+</div>
+
+<div class="moverlay" id="modal-pickProfile">
+  <div class="modal">
+    <div class="mh"><div class="mt">Pick recipient</div><button class="mc" data-close-modal="pickProfile">×</button></div>
+    <div class="mb">
+      <input class="inp" id="pickProfileSearch" placeholder="Search by name or address…" style="margin-bottom:10px" autocomplete="off">
+      <div id="pickProfileList"></div>
+      <div id="pickProfileEmpty" style="display:none;padding:14px;text-align:center;font-size:12px;color:var(--text3)">No matches</div>
+    </div>
+  </div>
+</div>
+
+<!-- EDIT COMPANY MODAL -->
+<div class="moverlay" id="modal-editCompany">
+  <div class="modal">
+    <div class="mh"><div class="mt">Edit company info</div><button class="mc" data-close-modal="editCompany">×</button></div>
+    <div class="mb" style="gap:14px">
+      <div class="fg"><label class="lbl">Company name</label><input class="inp" id="ec-name" type="text"></div>
+      <div class="fg"><label class="lbl">Tagline</label><input class="inp" id="ec-tagline" type="text"></div>
+      <div class="fg"><label class="lbl">Company email</label><input class="inp" id="ec-email" type="email"></div>
+      <div class="fg"><label class="lbl">Official legal name</label><input class="inp" id="ec-legal" type="text"></div>
+      <div style="border-top:1px solid var(--border);margin:6px 0 0;padding-top:14px;display:flex;flex-direction:column;gap:14px">
+        <div class="fg"><label class="lbl">Accountant wallet(s) <span style="color:var(--text3);font-weight:400">· comma-separated · grants edit access</span></label><input class="inp" id="ec-accountant-wallet" type="text" placeholder="0x04a1…, 0x07bc…"></div>
+        <div class="fg"><label class="lbl">Accountant email(s) <span style="color:var(--text3);font-weight:400">· comma-separated · contact only</span></label><input class="inp" id="ec-accountant-email" type="text" placeholder="alice@example.com, bob@example.com"></div>
+        <div class="fg"><label class="lbl">Operator email(s) <span style="color:var(--text3);font-weight:400">· comma-separated</span></label><input class="inp" id="ec-operator-email" type="text" placeholder="carol@example.com, dave@example.com"></div>
+      </div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-s" data-close-modal="editCompany">Cancel</button>
+      <button class="btn btn-p" id="saveCompanyBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- DEPOSIT MODAL -->
+<div class="moverlay" id="modal-deposit">
+  <div class="modal" style="max-width:480px">
+    <div class="mh"><div class="mt">Deposit</div><button class="mc" data-close-modal="deposit">×</button></div>
+    <div class="mb" style="gap:14px">
+      <div id="depFormSection" style="display:flex;flex-direction:column;gap:14px">
+        <div style="font-size:12px;color:var(--text3);line-height:1.45">
+          Moves funds from your wallet into your private balance. Your wallet will ask you to approve two requests.
+        </div>
+        <div class="fg"><label class="lbl">Token</label>
+          <div id="depCurrencyPills" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:0">
+            <div class="cur-pill active" data-currency="usdc" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">USDC</div>
+            <div class="cur-pill" data-currency="strk" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">STRK</div>
+            <div class="cur-pill" data-currency="eth" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">ETH</div>
+          </div>
+        </div>
+        <div class="fg"><label class="lbl">Amount</label><input class="inp" id="dep-amount" type="text" placeholder="e.g. 10 or 0.5" spellcheck="false" autocomplete="off">
+          <div id="dep-balance" style="font-size:11px;color:var(--text3);margin-top:4px">Wallet balance: —</div>
+        </div>
+      </div>
+      <div id="dep-status" style="display:none;font-size:11px;color:var(--text3);font-family:monospace;word-break:break-all;background:var(--surface2);border-radius:6px;padding:8px;white-space:pre-wrap"></div>
+      <div id="dep-finalizing" style="display:none;align-items:center;gap:8px;font-size:12px;color:var(--text3)">
+        <div class="spin"></div><span>Refreshing balances…</span>
+      </div>
+      <div id="dep-err" style="display:none;font-size:11px;color:var(--err);word-break:break-word"></div>
+    </div>
+    <div class="mf">
+      <div id="depFormFooter" style="display:flex;gap:8px">
+        <button class="btn btn-s" data-close-modal="deposit">Cancel</button>
+        <button class="btn btn-p" id="depositConfirmBtn">Deposit</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- WITHDRAW MODAL -->
+<div class="moverlay" id="modal-withdraw">
+  <div class="modal" style="max-width:480px">
+    <div class="mh"><div class="mt">Withdraw</div><button class="mc" data-close-modal="withdraw">×</button></div>
+    <div class="mb" style="gap:14px">
+      <div id="wdFormSection" style="display:flex;flex-direction:column;gap:14px">
+        <div style="font-size:12px;color:var(--text3);line-height:1.45">
+          Moves funds from your private balance back to your connected wallet. Your wallet will ask you to approve one request.
+        </div>
+        <div class="fg"><label class="lbl">Token</label>
+          <div id="wdCurrencyPills" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:0">
+            <div class="cur-pill active" data-currency="usdc" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">USDC</div>
+            <div class="cur-pill" data-currency="strk" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">STRK</div>
+            <div class="cur-pill" data-currency="eth" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">ETH</div>
+          </div>
+        </div>
+        <div class="fg"><label class="lbl">Amount</label><input class="inp" id="wd-amount" type="text" placeholder="e.g. 10 or 0.5" spellcheck="false" autocomplete="off">
+          <div id="wd-balance" style="font-size:11px;color:var(--text3);margin-top:4px">Private balance: —</div>
+        </div>
+      </div>
+      <div id="wd-status" style="display:none;font-size:11px;color:var(--text3);font-family:monospace;word-break:break-all;background:var(--surface2);border-radius:6px;padding:8px;white-space:pre-wrap"></div>
+      <div id="wd-finalizing" style="display:none;align-items:center;gap:8px;font-size:12px;color:var(--text3)">
+        <div class="spin"></div><span>Refreshing balances…</span>
+      </div>
+      <div id="wd-err" style="display:none;font-size:11px;color:var(--err);word-break:break-word"></div>
+    </div>
+    <div class="mf">
+      <div id="wdFormFooter" style="display:flex;gap:8px">
+        <button class="btn btn-s" data-close-modal="withdraw">Cancel</button>
+        <button class="btn btn-p" id="withdrawConfirmBtn">Withdraw</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CONVERT MODAL -->
+<div class="moverlay" id="modal-convert">
+  <div class="modal" style="max-width:480px">
+    <div class="mh"><div class="mt">Swap</div><button class="mc" data-close-modal="convert">×</button></div>
+    <div class="mb" style="gap:14px">
+      <div id="swFormSection" style="display:flex;flex-direction:column;gap:14px">
+        <div style="font-size:12px;color:var(--text3);line-height:1.45">
+          Swaps one currency for another inside your private balance — nothing leaves the private side.
+        </div>
+        <div class="fg"><label class="lbl">From</label>
+          <div id="swFromPills" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:0">
+            <div class="cur-pill active" data-currency="usdc" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">USDC</div>
+            <div class="cur-pill" data-currency="strk" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">STRK</div>
+            <div class="cur-pill" data-currency="eth" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">ETH</div>
+          </div>
+        </div>
+        <div class="fg"><label class="lbl">To</label>
+          <div id="swToPills" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:0">
+            <div class="cur-pill" data-currency="usdc" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">USDC</div>
+            <div class="cur-pill active" data-currency="strk" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">STRK</div>
+            <div class="cur-pill" data-currency="eth" style="padding:10px 12px;font-size:13px;font-weight:500;border-radius:8px;text-align:center;cursor:pointer">ETH</div>
+          </div>
+        </div>
+        <div class="fg"><label class="lbl">Amount (in From token)</label><input class="inp" id="sw-amount" type="text" placeholder="e.g. 10 or 0.5" spellcheck="false" autocomplete="off">
+          <div id="sw-balance" style="font-size:11px;color:var(--text3);margin-top:4px">Private balance: —</div>
+        </div>
+      </div>
+      <div id="sw-status" style="display:none;font-size:11px;color:var(--text3);font-family:monospace;word-break:break-all;background:var(--surface2);border-radius:6px;padding:8px;white-space:pre-wrap"></div>
+      <div id="sw-finalizing" style="display:none;align-items:center;gap:8px;font-size:12px;color:var(--text3)">
+        <div class="spin"></div><span>Refreshing balances…</span>
+      </div>
+      <div id="sw-err" style="display:none;font-size:11px;color:var(--err);word-break:break-word"></div>
+    </div>
+    <div class="mf">
+      <div id="swFormFooter" style="display:flex;gap:8px">
+        <button class="btn btn-s" data-close-modal="convert">Cancel</button>
+        <button class="btn btn-p" id="convertConfirmBtn">Swap</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- PAYMASTER KEY MODAL -->
+<div class="moverlay" id="modal-paymasterKey">
+  <div class="modal" style="max-width:480px">
+    <div class="mh"><div class="mt">Configure paymaster</div><button class="mc" data-close-modal="paymasterKey">×</button></div>
+    <div class="mb" style="gap:14px">
+      <div style="font-size:12px;color:var(--text3);line-height:1.45">
+        The wallet API can't sign V3 envelopes with <code>proofFacts</code>, so the final SetViewingKey tx needs a starknet.js Account built from a private key. The key stays in memory only.
+      </div>
+      <div class="fg"><label class="lbl">Account address</label><input class="inp" id="pm-address" type="text" placeholder="0x..." spellcheck="false" autocomplete="off"></div>
+      <div class="fg"><label class="lbl">Private key</label><input class="inp" id="pm-private-key" type="password" placeholder="0x..." spellcheck="false" autocomplete="off"></div>
+      <div id="pm-status" style="display:none;font-size:11px;color:var(--text3);font-family:monospace;word-break:break-all;background:var(--surface2);border-radius:6px;padding:8px"></div>
+      <div id="pm-err" style="display:none;font-size:11px;color:var(--err);word-break:break-word"></div>
+    </div>
+    <div class="mf">
+      <button class="btn btn-s" data-close-modal="paymasterKey">Cancel</button>
+      <button class="btn btn-p" id="paymasterKeyBtn">Save paymaster</button>
+    </div>
+  </div>
+</div>
+
+<!-- WALLET PICKER MODAL -->
+<div class="moverlay" id="modal-walletPicker">
+  <div class="modal" style="max-width:360px">
+    <div class="mh"><div class="mt">Wallet</div><button class="mc" data-close-modal="walletPicker">×</button></div>
+    <div class="mb" style="gap:10px">
+      <div id="walletConnectedSection" style="display:none;background:var(--surface2);border-radius:8px;padding:12px;margin-bottom:2px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Connected</div>
+        <div style="font-family:monospace;font-size:12px;font-weight:500;word-break:break-all" id="walletConnectedAddr"></div>
+        <button class="btn btn-s" id="disconnectWalletBtn" style="width:100%;margin-top:10px;background:#ef4444;color:#fff;border-color:transparent">Disconnect</button>
+      </div>
+      <div style="font-size:12px;color:var(--text3);text-align:center;padding:2px 0" id="walletSwitchHint">Connect a wallet</div>
+      <div id="walletPickerErr" style="display:none"></div>
+      <div id="walletOptList" style="display:flex;flex-direction:column;gap:10px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- AUDIT DETAIL MODAL -->
+<div class="moverlay" id="modal-auditDetail">
+  <div class="modal" style="max-width:520px">
+    <div class="mh"><div class="mt">Transaction detail</div><button class="mc" data-close-modal="auditDetail">×</button></div>
+    <div class="mb" style="padding:18px 24px 24px">
+      <div class="txd-grid">
+        <div class="txd-lbl">Name</div><div class="txd-val" id="txdName">—</div>
+        <div class="txd-lbl">Type</div><div class="txd-val" id="txdType">—</div>
+        <div class="txd-lbl">Date</div><div class="txd-val" id="txdDate">—</div>
+        <div class="txd-lbl">Time (UTC)</div><div class="txd-val" id="txdTime">—</div>
+        <div class="txd-lbl">Address</div><div class="txd-val" id="txdAddr" style="word-break:break-all">—</div>
+        <div class="txd-lbl">Amount</div><div class="txd-val"><span id="txdAmount">—</span> <span id="txdCurrency" style="color:var(--text3);font-weight:400"></span></div>
+        <div class="txd-lbl">TX Hash</div><div class="txd-val" id="txdTx" style="word-break:break-all">—</div>
+        <div class="txd-lbl">Explorer</div><div class="txd-val"><a id="txdExplorer" href="#" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-weight:500">View on Voyager ↗</a></div>
+        <div class="txd-lbl">Description</div><div class="txd-val" id="txdDescription">—</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- OPERATIONS PANEL — pinned to the bottom of the viewport, hidden when empty.
+     Lets the operator track Shield/Unshield/Convert/Transfer in the background. -->
+<div id="opsPanel" style="display:none">
+  <div id="opsHeader">
+    <span id="opsHeaderLabel" style="font-weight:500;font-size:15px">Operations</span>
+    <span id="opsHeaderSub" style="font-size:13px;color:var(--text3)"></span>
+    <button id="opsClearBtn" type="button" style="display:none;margin-left:auto;background:none;border:none;color:var(--text3);font-size:13px;cursor:pointer;text-decoration:underline">Clear finished</button>
+    <span id="opsHeaderArrow" style="font-size:11px;color:var(--text3);margin-left:10px">▼</span>
+  </div>
+  <div id="opsList"></div>
+</div>
+
+<script type="module" src="bundle.js"></script>
+</body>
+</html>
