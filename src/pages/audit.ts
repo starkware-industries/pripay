@@ -37,13 +37,26 @@ const TYPE_VISUALS: Record<string, { label: string; badgeClass: string; rowAccen
   // Public (wallet-direct) sends get their own badge so the private/public
   // distinction is visible at a glance, not just via the shield mark.
   UnshieldedTransfer: { label: 'Sent · public', badgeClass: 'b-gray' },
+  // These five were being dropped upstream in fetchAuditHistory, so they never
+  // needed visuals before.
+  Withdraw:           { label: 'Unshield',      badgeClass: 'b-amber' },
+  Received:           { label: 'Received',      badgeClass: 'b-green' },
+  Convert:            { label: 'Convert',       badgeClass: 'b-blue' },
+  SelfTransfer:       { label: 'Internal',      badgeClass: 'b-gray',  rowAccent: 'var(--bg3)' },
+  Fee:                { label: 'Network fee',   badgeClass: 'b-gray' },
 };
+
+// Rows that moved value through the privacy pool (everything except the public
+// wallet-direct sends and the activation marker).
+const POOL_TYPES = new Set(['Deposit', 'OneTime', 'Recurrent', 'Withdraw', 'Received', 'Convert', 'SelfTransfer', 'Fee']);
+// Rows where value came IN to the operator, for the direction arrow.
+const INBOUND_TYPES = new Set(['Deposit', 'Received', 'Convert']);
 
 // Returns true when the row represents a tx that went through the
 // privacy pool (= we should render the shield indicator next to it).
 function isShieldedRow(t: AuditTx): boolean {
   if (t.unshielded) return false; // wallet-direct rows never get the shield
-  return t.type === 'OneTime' || t.type === 'Recurrent' || t.type === 'Deposit';
+  return POOL_TYPES.has(t.type ?? '');
 }
 
 // Fixed-width shield slot keeps the type column aligned across rows
@@ -108,13 +121,15 @@ const BADGE_COLOR: Record<string, string> = {
   'b-gray':  'var(--text2)',
 };
 
-// Small arrow next to the type badge: inbound (↙) for deposits, outbound (↗)
-// for payments, tinted to the row's type color. Onboard rows get no arrow.
+// Small arrow next to the type badge: inbound (↙) for value arriving, outbound
+// (↗) for value leaving, tinted to the row's type color. Activation and internal
+// self-transfers get no arrow — nothing moved in or out.
 function directionIcon(t: AuditTx, color: string): HTMLElement | null {
-  if (t.type !== 'Deposit' && t.type !== 'OneTime' && t.type !== 'Recurrent' && t.type !== 'UnshieldedTransfer') return null;
-  const isIn = t.type === 'Deposit';
+  const type = t.type ?? '';
+  if (type === 'Onboard' || type === 'SelfTransfer' || !TYPE_VISUALS[type]) return null;
+  const isIn = INBOUND_TYPES.has(type);
   const span = document.createElement('span');
-  span.title = isIn ? 'Incoming · deposit to pool' : 'Outgoing · payment';
+  span.title = isIn ? 'Incoming · value received' : 'Outgoing · value sent';
   span.textContent = isIn ? '↙' : '↗';
   span.style.cssText = `font-size:14px;font-weight:500;line-height:1;color:${color}`;
   return span;
@@ -259,7 +274,11 @@ function filteredRows(): AuditTx[] {
     // wallet ERC20 transfers under one filter — they're all "money I
     // sent" from the operator's perspective.
     if (typeFilter === 'sent') {
-      return type === 'OneTime' || type === 'Recurrent' || type === 'UnshieldedTransfer';
+      return type === 'OneTime' || type === 'Recurrent' || type === 'UnshieldedTransfer' || type === 'Withdraw';
+    }
+    // 'received' is the mirror: value arriving, however it arrived.
+    if (typeFilter === 'received') {
+      return type === 'Deposit' || type === 'Received' || type === 'Convert';
     }
     // 'OneTime' filter includes the unshielded direct-wallet equivalent.
     if (typeFilter === 'OneTime') {
