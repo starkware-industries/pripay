@@ -117,13 +117,14 @@ export function submitPaymasterKey(): void {
 // configured — the operator's "AVNU is whitelisted and ready" switch — and the
 // service answers. Otherwise leave the existing submitter so the paste-key
 // fallback and local dev keep working while AVNU onboarding is still pending.
+// Activate the gasless AVNU submitter. Callers MUST have a live SIWS session first
+// (see the wallet-changed listener in main.ts) — /api/paymaster is session-gated.
 export async function configureAvnuPaymaster(): Promise<void> {
-  if (!PAYMASTER_FORWARDER) return;
-  try {
-    if (!(await paymasterAvailable())) return;
-  } catch {
+  if (!PAYMASTER_FORWARDER) {
+    console.info('[paymaster] no forwarder configured for this network — staying on the paste-key submitter');
     return;
   }
+  if (!(await paymasterAvailable())) return;   // reason already logged by the probe
   state.submitter = new AvnuPaymasterSubmitter(POOL_FEE_TOKEN, PAYMASTER_FORWARDER);
   renderSettings();
 }

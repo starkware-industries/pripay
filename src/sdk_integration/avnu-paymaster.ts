@@ -98,12 +98,18 @@ export async function executeApplyAction(args: {
   return txHash;
 }
 
-// Boot-time health probe. Returns false (rather than throwing) so a paymaster
-// outage degrades to the paste-key fallback instead of bricking the app.
+// Health probe, run once a wallet session exists. Returns false (rather than
+// throwing) so a paymaster outage degrades to the paste-key fallback instead of
+// bricking the app — but the reason is logged rather than swallowed. Silence here
+// cost real debugging time: the proxy requires a SIWS session, so a 401 means the
+// probe ran before login, which is a very different problem from "paymaster is down"
+// or "AVNU_PAYMASTER_API_KEY is unset" (that one surfaces as 503).
 export async function paymasterAvailable(): Promise<boolean> {
   try {
     return await rpc<boolean>('paymaster_isAvailable', {});
-  } catch {
+  } catch (e) {
+    console.warn('[paymaster] availability probe failed — staying on the paste-key submitter:',
+      e instanceof Error ? e.message : e);
     return false;
   }
 }
