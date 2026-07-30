@@ -223,6 +223,20 @@ function init() {
   };
   refreshIdentity();
   document.addEventListener('wallet-changed', () => { updateNavAccess(); refreshIdentity(); });
+  // Paymaster activation is tied to the wallet session, not to page load: the
+  // /api/paymaster proxy requires a SIWS session, so probing during init() only ever
+  // got a 401 and silently dropped everyone onto the paste-key submitter. By the time
+  // wallet-changed fires on connect, walletSignIn has already set the session cookie.
+  // The local dev override runs after, so paymaster.local.json still wins.
+  document.addEventListener('wallet-changed', () => {
+    if (!state.walletConnected) {
+      clearPaymaster();   // session is gone; an AVNU submitter would only 401
+      return;
+    }
+    void configureAvnuPaymaster()
+      .catch((err) => console.warn('[paymaster] activation failed:', err))
+      .finally(() => void loadLocalPaymaster());
+  });
   // Admin edited a wallet's company in Settings → refresh the registered-wallets list.
   document.addEventListener('companies-updated', () => { if (state.isAdmin) renderSettings(); });
 
@@ -493,9 +507,9 @@ function init() {
   // Transfer in the background so the user isn't blocked by the 10-block wait.
   initOperationsPanel();
 
-  // Activate the AVNU paymaster (gasless) when configured + reachable; a local
-  // paymaster.local.json (dev only, gitignored) overrides it afterwards.
-  void configureAvnuPaymaster().finally(() => void loadLocalPaymaster());
+  // NOTE: paymaster activation deliberately does NOT happen here. /api/paymaster
+  // requires a SIWS session, which does not exist yet at init(). It runs off
+  // wallet-changed instead — see the listener above.
 }
 
 // Fetch live prices then init; fall back to defaults instantly if slow

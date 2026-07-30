@@ -15648,7 +15648,11 @@ async function executeApplyAction(args) {
 async function paymasterAvailable() {
   try {
     return await rpc("paymaster_isAvailable", {});
-  } catch {
+  } catch (e) {
+    console.warn(
+      "[paymaster] availability probe failed \u2014 staying on the paste-key submitter:",
+      e instanceof Error ? e.message : e
+    );
     return false;
   }
 }
@@ -32881,12 +32885,11 @@ function submitPaymasterKey() {
   }
 }
 async function configureAvnuPaymaster() {
-  if (!PAYMASTER_FORWARDER) return;
-  try {
-    if (!await paymasterAvailable()) return;
-  } catch {
+  if (!PAYMASTER_FORWARDER) {
+    console.info("[paymaster] no forwarder configured for this network \u2014 staying on the paste-key submitter");
     return;
   }
+  if (!await paymasterAvailable()) return;
   state.submitter = new AvnuPaymasterSubmitter(POOL_FEE_TOKEN, PAYMASTER_FORWARDER);
   renderSettings();
 }
@@ -34290,6 +34293,13 @@ function init() {
     updateNavAccess();
     refreshIdentity();
   });
+  document.addEventListener("wallet-changed", () => {
+    if (!state.walletConnected) {
+      clearPaymaster();
+      return;
+    }
+    void configureAvnuPaymaster().catch((err) => console.warn("[paymaster] activation failed:", err)).finally(() => void loadLocalPaymaster());
+  });
   document.addEventListener("companies-updated", () => {
     if (state.isAdmin) renderSettings();
   });
@@ -34575,7 +34585,6 @@ function init() {
   renderRec();
   renderAudit();
   initOperationsPanel();
-  void configureAvnuPaymaster().finally(() => void loadLocalPaymaster());
 }
 fetchNISRates().finally(() => {
   renderFxRateChip();
