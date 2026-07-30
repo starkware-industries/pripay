@@ -246,6 +246,38 @@ function keyOwnerAddr(key) {
   return /^0x[0-9a-fA-F]{1,64}$/.test(last) ? last : null;
 }
 
+// Every kv key the client legitimately touches, by shape. The /api/:key router is
+// default-DENY against these lists: a new key has to be added here deliberately,
+// rather than being created by whoever calls the endpoint first.
+//
+// This used to be inferred from the key alone — a `…:0x<addr>` suffix meant
+// "check the owner", anything else meant "no check at all". That made every
+// non-wallet-scoped key world-writable.
+const KV_WALLET_KINDS = ['vk', 'onboarded', 'payroll', 'companyInfo', 'recurrentTxs', 'txMeta', 'unshieldedTxs'];
+const KV_WALLET_KEY = new RegExp(`^pripay:(?:${KV_WALLET_KINDS.join('|')}):0x[0-9a-fA-F]{1,64}$`);
+// Global keys (no owner to check against). Readable by anyone, writable by admins
+// only: whoever sets pripay:payroll_class_hash picks the contract class every new
+// operator deploys and funds, so an unauthenticated write here is fund loss.
+const KV_GLOBAL_KEYS = new Set(['pripay:payroll_class_hash']);
+
+// Authorize a kv read/write. Returns true when the request may proceed; on false it
+// has already sent the response.
+function authorizeKv(req, res, key, write) {
+  if (KV_GLOBAL_KEYS.has(key)) {
+    if (!write) return true;
+    if (!isAdminReq(req)) { res.status(403).json({ error: 'admin only' }); return false; }
+    return true;
+  }
+  if (!KV_WALLET_KEY.test(key)) { res.status(403).json({ error: 'unknown key' }); return false; }
+  // Company info is permission-gated — force writes through /api/company/:addr so an
+  // operator can't bypass the accountant/admin check by writing the kv key directly.
+  if (write && key.startsWith('pripay:companyInfo:')) {
+    res.status(403).json({ error: 'use PUT /api/company/:addr' });
+    return false;
+  }
+  return requireWalletOwner(req, res, keyOwnerAddr(key));
+}
+
 // Mixed-content proxies — must precede express.json so bodies stream raw.
 app.use('/api/discovery', streamProxy(DISCOVERY_UPSTREAM));
 app.use('/api/prover', streamProxy(PROVER_UPSTREAM));
@@ -313,8 +345,20 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-// --- IAP identity (from the verified header — never the request body) ---
+// --- IAP identity ---
+// This header is only trustworthy behind a real Google IAP, which overwrites any
+// client-supplied copy. Anywhere else (Vercel, plain Node, a container reachable
+// without IAP) it is just an attacker-controlled request header, so it is ignored
+// unless the deployment explicitly opts in.
+//
+// Do NOT set TRUST_IAP_HEADER on a host that is not behind IAP: it lets any caller
+// claim any email, and with it the accountant permission below. Prefer
+// accountantWallets (SIWS-proved) — the email path exists only for the GCP+IAP
+// deployment. Hardening it further means verifying the x-goog-iap-jwt-assertion
+// signature rather than trusting a plaintext header at all.
+const TRUST_IAP_HEADER = process.env.TRUST_IAP_HEADER === '1';
 function iapEmail(req) {
+  if (!TRUST_IAP_HEADER) return null;
   const raw = req.headers['x-goog-authenticated-user-email'];
   return raw ? String(raw).replace(/^accounts\.google\.com:/, '') : null;
 }
@@ -322,12 +366,21 @@ function iapEmail(req) {
 // felts). Fails CLOSED: no session, or an address not in the list, is NOT admin.
 // (The old model trusted a client-spoofable IAP header and defaulted to admin
 // when it was absent — i.e. every request on Vercel was admin.)
+function adminWallets() {
+  return (process.env.ADMIN_WALLETS || '').split(',').map((x) => x.trim()).filter(Boolean);
+}
 function isAdminReq(req) {
   const s = readSession(req);
   if (!s) return false;
-  return (process.env.ADMIN_WALLETS || '')
-    .split(',').map((x) => x.trim()).filter(Boolean)
-    .some((a) => feltEq(a, s.a));
+  return adminWallets().some((a) => feltEq(a, s.a));
+}
+// A malformed entry can never match a session address (feltEq parses both as felts),
+// so a typo here reads as "admin access silently stopped working" rather than as a
+// config error. Say so at boot instead.
+for (const a of adminWallets()) {
+  try { BigInt(a); } catch {
+    console.warn(`[auth] ADMIN_WALLETS entry is not a valid address, it will never match: ${a}`);
+  }
 }
 const companyKvKey = (addr) => 'pripay:companyInfo:' + String(addr).toLowerCase();
 
@@ -359,8 +412,7 @@ app.get('/api/companies', async (req, res) => {
 
 // Read a key
 app.get('/api/:key', async (req, res) => {
-  const owner = keyOwnerAddr(req.params.key);
-  if (owner && !requireWalletOwner(req, res, owner)) return;
+  if (!authorizeKv(req, res, req.params.key, false)) return;
   try {
     const doc = await store.getDoc(kvPath(req.params.key));
     res.json(doc ? doc.value : null);
@@ -372,13 +424,7 @@ app.get('/api/:key', async (req, res) => {
 
 // Write a key
 app.put('/api/:key', async (req, res) => {
-  // Company info is permission-gated — force it through /api/company/:addr so an
-  // operator can't bypass the check by writing the kv key directly.
-  if (req.params.key.startsWith('pripay:companyInfo:')) {
-    return res.status(403).json({ error: 'use PUT /api/company/:addr' });
-  }
-  const owner = keyOwnerAddr(req.params.key);
-  if (owner && !requireWalletOwner(req, res, owner)) return;
+  if (!authorizeKv(req, res, req.params.key, true)) return;
   try {
     await store.setDoc(kvPath(req.params.key), { value: req.body });
     res.json({ ok: true });
@@ -449,8 +495,11 @@ app.put('/api/registry/:addr', async (req, res) => {
   }
 });
 
-// Company-info write, permission-enforced: allowed for an admin, an accountant of
-// THIS wallet, or first-time setup (no company yet). Operators/others are rejected.
+// Company-info write, permission-enforced: allowed for an admin wallet, the wallet
+// that owns the company, or an accountant of THIS wallet. Everyone else is rejected,
+// including anonymous callers setting up a company for the first time — proving you
+// own the wallet is the entry ticket. (An earlier comment here described a
+// first-time-setup exemption; no such clause exists, and the tests now pin that.)
 app.put('/api/company/:addr', async (req, res) => {
   const addr = req.params.addr;
   const email = iapEmail(req);
@@ -459,11 +508,13 @@ app.put('/api/company/:addr', async (req, res) => {
     const existing = existingDoc ? existingDoc.value : null;
     const accountants = (existing && Array.isArray(existing.accountantEmails) ? existing.accountantEmails : [])
       .map((s) => String(s).toLowerCase());
+    const accountantWallets = (existing && Array.isArray(existing.accountantWallets) ? existing.accountantWallets : []);
     const s = readSession(req);
     const ownsWallet = !!s && feltEq(s.a, addr);                 // proved wallet ownership via SIWS
     const allowed = isAdminReq(req)                              // admin wallet (ADMIN_WALLETS)
       || ownsWallet                                              // the owner can manage their own company
-      || (!!email && accountants.includes(email.toLowerCase())); // accountant (only behind a real IAP)
+      || (!!s && accountantWallets.some((w) => feltEq(w, s.a)))  // accountant by wallet (SIWS-proved)
+      || (!!email && accountants.includes(email.toLowerCase())); // accountant by email — TRUST_IAP_HEADER only
     if (!allowed) return res.status(403).json({ error: 'not permitted to edit company info' });
     await store.setDoc(kvPath(companyKvKey(addr)), { value: req.body });
     await store.setDoc(`registry/${encodeURIComponent(addr.toLowerCase())}`, { addr: addr.toLowerCase() });

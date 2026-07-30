@@ -18,6 +18,14 @@ type NetworkConfig = {
   // prover/discovery are server-side only (see server.js) — deliberately not here.
   payrollClassHash:          string;
   payrollCompiledClassHash:  string;
+  // Extra class hashes accepted for PayrollContract, beyond payrollClassHash.
+  // declarePayrollIfNeeded caches the declared hash under a SHARED server key, so
+  // that cached value is untrusted input — whoever can write it would otherwise
+  // choose the class every new operator deploys and funds. Only hashes pinned here
+  // are honoured. Add one only if a re-declare ever yields a different hash (the
+  // wallet's ABI re-serialization can change the keccak), and verify on-chain that
+  // it is really our class before doing so.
+  extraAllowedPayrollClassHashes?: string[];
   usdcAddress:               string;
   explorerUrl:               string;
   // Optional: address of the swap-anonymizer executor contract. When unset,
@@ -110,6 +118,14 @@ export const RPC_URL                    = active.rpcUrl;
 export const POOL_ADDRESS               = active.poolAddress;
 export const PAYROLL_CLASS_HASH         = active.payrollClassHash;
 export const PAYROLL_COMPILED_CLASS_HASH = active.payrollCompiledClassHash;
+// Allowlist for the class we are willing to deploy as a PayrollContract. Both
+// networks currently have payrollClassHash declared on chain, so the cached hash is
+// only ever a fast path — an unrecognised cache entry costs a getClass call, not a
+// re-declare.
+export const ALLOWED_PAYROLL_CLASS_HASHES = [
+  active.payrollClassHash,
+  ...(active.extraAllowedPayrollClassHashes ?? []),
+];
 export const USDC_ADDRESS               = active.usdcAddress;
 export const EXPLORER_URL                = active.explorerUrl;
 export const EXECUTOR_ADDRESS            = active.executorAddress;

@@ -67,8 +67,14 @@ export interface CompanyInfo {
   // (an accountant of this wallet, or an admin). The singular legacy fields
   // are kept for back-compat with previously persisted CompanyInfo; new writes
   // go to the plural arrays.
+  //
+  // accountantWallets is the enforceable one: the server matches it against the
+  // SIWS session, so it works on any deployment. accountantEmails is only honoured
+  // behind a real Google IAP (server.js TRUST_IAP_HEADER) — off a host with IAP in
+  // front, the email header is caller-supplied and grants nothing.
   accountantEmail?: string;
   accountantEmails?: string[];
+  accountantWallets?: string[];
   // Operator(s) who run the payroll for this company (informational).
   operatorEmail?: string;
   operatorEmails?: string[];
