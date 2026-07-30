@@ -1,0 +1,20 @@
+{
+  // esbuild bundles without type checking, so nothing verified types before this
+  // file existed. `npm run typecheck` is deliberately NOT wired into `npm test`:
+  // it currently reports 9 pre-existing errors, all of them mismatches against the
+  // privacy SDK's published types (see README). Making it blocking would mean
+  // either pinning those mismatches with casts or holding every change hostage to
+  // an SDK release. Run it and compare against that baseline instead.
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2023", "dom"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -12,7 +12,46 @@ npm run dev       # Watch build + serve at http://localhost:8080
 
 Visit `http://localhost:8080` and connect a Starknet wallet (Ready, Braavos, Xverse, or Fordefi).
 
-**Note:** `node_modules` is committed. Do not run `npm install` — the private Starknet SDK makes fresh installs fragile.
+### Installing dependencies
+
+`node_modules` is committed, because `@starkware-libs/starknet-privacy-sdk` is published to
+GitHub Packages rather than the public npm registry. To install from scratch you need a
+GitHub token with `read:packages` exported as `GITHUB_TOKEN` (see [`.npmrc`](.npmrc));
+without one, `npm install` cannot resolve the privacy SDK at all.
+
+Two known rough edges in the committed tree:
+
+- It carries only the **linux-x64** esbuild binary, so `npm run build` fails on Apple
+  Silicon and other platforms. Install esbuild for your platform, or run a fresh
+  `npm install` with a token.
+- `@upstash/redis` is declared but absent, so the KV store path is unavailable locally.
+  That is fine for local dev, which uses the JSON file store.
+
+Dependency install scripts are disabled repo-wide (`ignore-scripts=true` in `.npmrc`) —
+an install script runs with full privileges before any of our code is reviewed. Nothing
+in the tree needs one.
+
+## Configuration
+
+All server configuration is via environment variables. None are required for local
+development, where the defaults target Starknet Sepolia and a local JSON store.
+
+| Variable | Purpose |
+|----------|---------|
+| `AUTH_SECRET` | **Required in production.** HMAC key for SIWS nonces + session cookies. Must be stable across instances — the server refuses to boot on Vercel without it, since a per-boot random value would only validate on the instance that issued it. |
+| `ADMIN_WALLETS` | Comma-separated Starknet addresses granted admin (the Settings page, company listing, writes to global keys). Fails closed: unset means nobody is admin. Malformed entries are warned about at boot. |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Upstash Redis / Vercel KV. Enables the durable store **and** fleet-wide rate limiting. Without it, rate limits are per-process — fine for one local server, ineffective on serverless. |
+| `GOOGLE_CLOUD_PROJECT` | Selects the Firestore-over-REST store. Ignored when KV is configured. |
+| `LOCAL_STORE` / `LOCAL_STORE_FILE` | Force the JSON file store, and where it lives. |
+| `AVNU_PAYMASTER_API_KEY` | Enables the gasless paymaster proxy. Absent → `/api/paymaster` returns 503 naming this variable. |
+| `AVNU_PAYMASTER_URL` | Paymaster endpoint. Must match the active network in `network-config.ts`. |
+| `PAYMASTER_EXEC_PER_HOUR_WALLET` | Sponsored transactions per wallet per hour (default 60). |
+| `PAYMASTER_EXEC_PER_HOUR_GLOBAL` | Sponsored transactions across all wallets per hour (default 500). This is the ceiling that bounds credit burn — a per-wallet limit alone does not, since wallets are free to create. |
+| `PROVER_UPSTREAM` / `DISCOVERY_UPSTREAM` | Upstreams for the same-origin `/api/prover` and `/api/discovery` proxies. Both require a wallet session and are rate limited. |
+| `STARKNET_RPC_URL` / `STARKNET_CHAIN_ID` | RPC used for server-side signature verification, and the SNIP-12 chain id accepted at login. |
+| `CSP_CONNECT_EXTRA` | Space-separated extra `connect-src` origins, for adding a data source without editing the policy. |
+| `ALLOWED_ORIGINS` | Comma-separated CORS allowlist. Empty (default) disables cross-origin access. |
+| `TRUST_IAP_HEADER` | Set to `1` **only** behind a real Google IAP. It makes the server trust `x-goog-authenticated-user-email`, which is caller-supplied anywhere else. Prefer `accountantWallets` on the company record, which is verified against the wallet session. |
 
 ## Key Features
 
@@ -71,6 +110,35 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for detailed system design, [
 - **Viewing keys** & **onboarding state** are stored locally (`data/pripay.json`, gitignored)
 - **Paymaster keys** for signing submissions are pasted per-session or loaded from `pripay/paymaster.local.json` (gitignored)
 - **Never commit private keys or credentials** to source control
+
+> **Known limitation — viewing keys are stored in plaintext server-side.** When a
+> server-backed store is configured, `ServerStorage` persists each wallet's viewing key
+> as a hex string. Per-wallet authorization stops other users reading it, but whoever
+> operates the server (or reads the database) can decrypt that wallet's entire private
+> transaction history. If you deploy this, treat the store as sensitive. Moving to
+> client-side encryption is tracked as known work, not yet done.
+
+## Security model
+
+A brief map of what is enforced where, since the API is public:
+
+- **Authentication** is Sign-In-With-Starknet. The client signs a server-issued,
+  single-use, address-bound nonce; the server verifies it against the account contract
+  and issues an HMAC-signed HttpOnly session cookie. There is no password anywhere.
+- **Authorization** is per wallet. Wallet-scoped keys and record collections require a
+  session whose address matches the target. The generic `/api/:key` router is
+  default-deny against an explicit allowlist — an unlisted key is refused rather than
+  created, and global keys are admin-write.
+- **Expensive endpoints** (`/api/prover`, `/api/discovery`, `/api/paymaster`) all
+  require a session and are rate limited, fleet-wide when KV is configured.
+- **Ceilings** bound what one identity can consume: 500 records per kind per wallet,
+  64 KiB per record, and hourly caps on sponsored transactions.
+- **Not covered:** these controls bound abuse per identity. Nothing here stops an
+  attacker creating many wallets — wallets are free, especially on testnet. Rotation
+  needs a platform-level control (WAF / global quota), and only the paymaster has a
+  global ceiling today.
+
+See [`SECURITY.md`](SECURITY.md) for how to report a vulnerability.
 
 ## License
 
