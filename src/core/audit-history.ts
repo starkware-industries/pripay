@@ -9,6 +9,7 @@ import type { ProviderInterface } from 'starknet';
 import type { AuditTx } from './types';
 import { TOKENS } from './validators';
 import { PAYMASTER_FORWARDER } from '../sdk_integration/network-config';
+import { getBlockTimestamps } from './block-time';
 
 // Page cap for the history sweep. Hit it and we log loudly rather than quietly
 // returning a partial ledger — see the warning below.
@@ -68,19 +69,13 @@ export async function fetchAuditHistory(
   // Local date (YYYY-MM-DD) and time (HH:MM) per block — formatted in the
   // operator's timezone instead of UTC, which matches what they read on
   // their wall clock and avoids "tx happened tomorrow" confusion.
+  //
+  // Timestamps come from the shared permanent cache (block-time.ts): this used to
+  // be one uncached getBlock per block on every load, re-fetched on every reload.
   const localByBlock = new Map<number, { date: string; time: string }>();
-  await Promise.all(
-    blockNumbers.map(async (bn) => {
-      try {
-        const block = await starknetProvider.getBlock(bn) as unknown as { timestamp?: number };
-        if (typeof block.timestamp === 'number') {
-          localByBlock.set(bn, formatLocalDateTime(block.timestamp * 1000));
-        }
-      } catch {
-        // Best-effort; missing timestamp falls back to '—'.
-      }
-    }),
-  );
+  for (const [bn, ts] of await getBlockTimestamps(starknetProvider, blockNumbers)) {
+    localByBlock.set(bn, formatLocalDateTime(ts * 1000));
+  }
 
   const entries: AuditTx[] = [];
   for (const tx of allTxs) {
@@ -200,20 +195,12 @@ export async function fetchAuditHistory(
           });
           break;
         }
-        case 'fee': {
-          const info = tokenInfo(action.token);
-          entries.push({
-            date,
-            time,
-            amount: bigIntToHuman(action.amount, info?.decimals ?? 18),
-            currency: info?.symbol ?? 'UNK',
-            tx: txHash,
-            addr: '0x' + action.toAddress.toString(16).padStart(64, '0'),
-            description: 'Network fee (paymaster)',
-            type: 'Fee',
-          });
+        case 'fee':
+          // Intentionally not shown. Paymaster fees are real outflows, but there is
+          // one per sponsored transaction and they bury the payroll rows the log
+          // exists to show. Kept as an explicit case (not a default) so the
+          // exhaustiveness check below still proves every action kind is considered.
           break;
-        }
         default: {
           // Every branch above is a HistoryAction kind. If the SDK adds another,
           // shout instead of dropping it — that silence is exactly why

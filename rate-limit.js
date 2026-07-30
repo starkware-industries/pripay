@@ -44,8 +44,15 @@ async function rateLimited(key, max, windowMs) {
   const bucket = `rl:${key}:${Math.floor(Date.now() / windowMs)}`;
   try {
     const n = await redis.incr(bucket);
-    // Only the request that created the bucket needs to set the TTL.
-    if (n === 1) await redis.expire(bucket, Math.ceil(windowMs / 1000) + 1);
+    // Set the TTL without blocking on it. Awaiting it put a second sequential
+    // round trip on the first request of every window, and /api/discovery is called
+    // repeatedly during a history sweep — that latency lands in page-load time.
+    // Retried for the first few calls so a single failure can't leak the key: the
+    // bucket name carries the window index, so it is never written to again once
+    // the window passes.
+    if (n <= 3) {
+      void Promise.resolve(redis.expire(bucket, Math.ceil(windowMs / 1000) + 1)).catch(() => {});
+    }
     return n > max;
   } catch (e) {
     // Degrade to the per-process limit rather than locking everyone out on a KV
