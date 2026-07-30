@@ -95,7 +95,13 @@ export interface AuditTx {
   addr: string;
   name?: string;
   description?: string;
-  type?: 'OneTime' | 'Recurrent' | 'Deposit' | 'Onboard' | 'UnshieldedTransfer';
+  // One per HistoryAction kind the SDK can classify, plus the client-side
+  // Recurrent/UnshieldedTransfer labels. Previously only OneTime, Recurrent,
+  // Deposit, Onboard and UnshieldedTransfer existed, and fetchAuditHistory
+  // silently discarded every action it had no type for — withdrawals, received
+  // transfers, swaps, self-transfers and fees never reached the audit log.
+  type?: 'OneTime' | 'Recurrent' | 'Deposit' | 'Onboard' | 'UnshieldedTransfer'
+    | 'Withdraw' | 'Received' | 'Convert' | 'SelfTransfer' | 'Fee';
   // True when the row originated from a wallet-direct ERC20 transfer
   // (i.e. didn't go through the privacy pool). Survives type re-labels
   // so an unshielded-recurrent row keeps its "no shield" rendering.

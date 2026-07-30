@@ -27299,6 +27299,15 @@ var TOKENS = {
 };
 
 // src/core/audit-history.ts
+var MAX_HISTORY_PAGES = 20;
+var FEE_RECIPIENTS = PAYMASTER_FORWARDER ? [toBigintSafe(PAYMASTER_FORWARDER)] : [];
+function toBigintSafe(v) {
+  try {
+    return BigInt(v);
+  } catch {
+    return 0n;
+  }
+}
 async function fetchAuditHistory(transfers, starknetProvider) {
   const discovery = transfers.discoveryProvider;
   if (!(discovery instanceof IndexerDiscoveryProvider)) return [];
@@ -27309,7 +27318,8 @@ async function fetchAuditHistory(transfers, starknetProvider) {
   const channelCursor = { channels: channelsResult.channels, total: channelsResult.total };
   const allTxs = [];
   let nextCursor;
-  for (let i = 0; i < 20; i++) {
+  let complete = false;
+  for (let i = 0; i < MAX_HISTORY_PAGES; i++) {
     const page = await discovery.fetchHistory(
       userAddrBig,
       notesResult.cursor,
@@ -27318,7 +27328,15 @@ async function fetchAuditHistory(transfers, starknetProvider) {
     );
     allTxs.push(...page.transactions);
     nextCursor = page.cursor;
-    if (page.cursor.historyComplete) break;
+    if (page.cursor.historyComplete) {
+      complete = true;
+      break;
+    }
+  }
+  if (!complete) {
+    console.warn(
+      `[audit] history still incomplete after ${MAX_HISTORY_PAGES} pages (${allTxs.length} transactions); the audit log is TRUNCATED. Raise MAX_HISTORY_PAGES in audit-history.ts.`
+    );
   }
   const blockNumbers = Array.from(new Set(allTxs.map((t) => t.blockNumber)));
   const localByBlock = /* @__PURE__ */ new Map();
@@ -27335,7 +27353,7 @@ async function fetchAuditHistory(transfers, starknetProvider) {
   );
   const entries = [];
   for (const tx of allTxs) {
-    const classified = classifyTransaction(tx);
+    const classified = classifyTransaction(tx, FEE_RECIPIENTS.length ? { feeRecipients: FEE_RECIPIENTS } : void 0);
     const txHash = "0x" + tx.transactionHash.toString(16).padStart(64, "0");
     const local = localByBlock.get(tx.blockNumber);
     const date = local?.date ?? "\u2014";
@@ -27384,6 +27402,86 @@ async function fetchAuditHistory(transfers, starknetProvider) {
             type: "OneTime"
           });
           break;
+        }
+        case "withdrawal": {
+          const info = tokenInfo(action.token);
+          entries.push({
+            date,
+            time,
+            amount: bigIntToHuman(action.amount, info?.decimals ?? 18),
+            currency: info?.symbol ?? "UNK",
+            tx: txHash,
+            addr: "0x" + action.toAddress.toString(16).padStart(64, "0"),
+            description: "Unshield from pool",
+            type: "Withdraw"
+          });
+          break;
+        }
+        case "transferReceived": {
+          const info = tokenInfo(action.token);
+          entries.push({
+            date,
+            time,
+            amount: bigIntToHuman(action.amount, info?.decimals ?? 18),
+            currency: info?.symbol ?? "UNK",
+            tx: txHash,
+            addr: "0x" + action.fromAddress.toString(16).padStart(64, "0"),
+            description: "Private transfer received",
+            type: "Received"
+          });
+          break;
+        }
+        case "transferSelf": {
+          const info = tokenInfo(action.token);
+          entries.push({
+            date,
+            time,
+            amount: bigIntToHuman(action.amount, info?.decimals ?? 18),
+            currency: info?.symbol ?? "UNK",
+            tx: txHash,
+            addr: "0x" + userAddrBig.toString(16).padStart(64, "0"),
+            name: "PayrollContract",
+            description: "Internal transfer (own notes)",
+            type: "SelfTransfer"
+          });
+          break;
+        }
+        case "swap": {
+          const legs = (xs) => xs.map((l) => {
+            const i = tokenInfo(l.token);
+            return `${bigIntToHuman(l.amount, i?.decimals ?? 18)} ${i?.symbol ?? "UNK"}`;
+          }).join(" + ");
+          const head = action.received[0];
+          const headInfo = head ? tokenInfo(head.token) : void 0;
+          entries.push({
+            date,
+            time,
+            amount: head ? bigIntToHuman(head.amount, headInfo?.decimals ?? 18) : 0,
+            currency: headInfo?.symbol ?? "\u2014",
+            tx: txHash,
+            addr: "0x" + action.executor.toString(16).padStart(64, "0"),
+            description: `Convert ${legs(action.sent)} \u2192 ${legs(action.received)}`,
+            type: "Convert"
+          });
+          break;
+        }
+        case "fee": {
+          const info = tokenInfo(action.token);
+          entries.push({
+            date,
+            time,
+            amount: bigIntToHuman(action.amount, info?.decimals ?? 18),
+            currency: info?.symbol ?? "UNK",
+            tx: txHash,
+            addr: "0x" + action.toAddress.toString(16).padStart(64, "0"),
+            description: "Network fee (paymaster)",
+            type: "Fee"
+          });
+          break;
+        }
+        default: {
+          const unknown = action;
+          console.warn("[audit] unhandled history action, row omitted:", unknown);
         }
       }
     }
@@ -33384,11 +33482,20 @@ var TYPE_VISUALS = {
   Recurrent: { label: "Payroll", badgeClass: "b-blue" },
   // Public (wallet-direct) sends get their own badge so the private/public
   // distinction is visible at a glance, not just via the shield mark.
-  UnshieldedTransfer: { label: "Sent \xB7 public", badgeClass: "b-gray" }
+  UnshieldedTransfer: { label: "Sent \xB7 public", badgeClass: "b-gray" },
+  // These five were being dropped upstream in fetchAuditHistory, so they never
+  // needed visuals before.
+  Withdraw: { label: "Unshield", badgeClass: "b-amber" },
+  Received: { label: "Received", badgeClass: "b-green" },
+  Convert: { label: "Convert", badgeClass: "b-blue" },
+  SelfTransfer: { label: "Internal", badgeClass: "b-gray", rowAccent: "var(--bg3)" },
+  Fee: { label: "Network fee", badgeClass: "b-gray" }
 };
+var POOL_TYPES = /* @__PURE__ */ new Set(["Deposit", "OneTime", "Recurrent", "Withdraw", "Received", "Convert", "SelfTransfer", "Fee"]);
+var INBOUND_TYPES = /* @__PURE__ */ new Set(["Deposit", "Received", "Convert"]);
 function isShieldedRow2(t) {
   if (t.unshielded) return false;
-  return t.type === "OneTime" || t.type === "Recurrent" || t.type === "Deposit";
+  return POOL_TYPES.has(t.type ?? "");
 }
 function shieldSlot2(t, color2) {
   const span = document.createElement("span");
@@ -33438,10 +33545,11 @@ var BADGE_COLOR2 = {
   "b-gray": "var(--text2)"
 };
 function directionIcon2(t, color2) {
-  if (t.type !== "Deposit" && t.type !== "OneTime" && t.type !== "Recurrent" && t.type !== "UnshieldedTransfer") return null;
-  const isIn = t.type === "Deposit";
+  const type = t.type ?? "";
+  if (type === "Onboard" || type === "SelfTransfer" || !TYPE_VISUALS[type]) return null;
+  const isIn = INBOUND_TYPES.has(type);
   const span = document.createElement("span");
-  span.title = isIn ? "Incoming \xB7 deposit to pool" : "Outgoing \xB7 payment";
+  span.title = isIn ? "Incoming \xB7 value received" : "Outgoing \xB7 value sent";
   span.textContent = isIn ? "\u2199" : "\u2197";
   span.style.cssText = `font-size:14px;font-weight:500;line-height:1;color:${color2}`;
   return span;
@@ -33560,7 +33668,10 @@ function filteredRows() {
     if (typeFilter === "all") return true;
     const type = t.type ?? "";
     if (typeFilter === "sent") {
-      return type === "OneTime" || type === "Recurrent" || type === "UnshieldedTransfer";
+      return type === "OneTime" || type === "Recurrent" || type === "UnshieldedTransfer" || type === "Withdraw";
+    }
+    if (typeFilter === "received") {
+      return type === "Deposit" || type === "Received" || type === "Convert";
     }
     if (typeFilter === "OneTime") {
       return type === "OneTime" || type === "UnshieldedTransfer";
