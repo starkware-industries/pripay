@@ -33726,18 +33726,18 @@ function showAuditDetail(t) {
     const el = document.getElementById(id);
     if (el) el.textContent = val;
   };
-  set("adName", name);
-  set("adType", TYPE_VISUALS[t.type ?? ""]?.label ?? (t.type ?? "\u2014"));
-  set("adDate", t.date);
-  set("adTime", t.time || "\u2014");
-  set("adAmount", fmtAmountCell(t));
-  set("adCurrency", "");
-  set("adDescription", t.description || "\u2014");
-  const addrEl = document.getElementById("adAddr");
+  set("txdName", name);
+  set("txdType", TYPE_VISUALS[t.type ?? ""]?.label ?? (t.type ?? "\u2014"));
+  set("txdDate", t.date);
+  set("txdTime", t.time || "\u2014");
+  set("txdAmount", fmtAmountCell(t));
+  set("txdCurrency", "");
+  set("txdDescription", t.description || "\u2014");
+  const addrEl = document.getElementById("txdAddr");
   if (addrEl) addrEl.replaceChildren(buildCopyableValue(t.addr));
-  const txEl = document.getElementById("adTx");
+  const txEl = document.getElementById("txdTx");
   if (txEl) txEl.replaceChildren(buildCopyableValue(t.tx));
-  const explorer = document.getElementById("adExplorer");
+  const explorer = document.getElementById("txdExplorer");
   if (explorer) explorer.href = `${EXPLORER_URL}/tx/${t.tx}`;
   openM("auditDetail");
 }

@@ -323,21 +323,21 @@ function showAuditDetail(t: AuditTx): void {
     const el = document.getElementById(id);
     if (el) el.textContent = val;
   };
-  set('adName',        name);
-  set('adType',        TYPE_VISUALS[t.type ?? '']?.label ?? (t.type ?? '—'));
-  set('adDate',        t.date);
-  set('adTime',        t.time || '—');
-  set('adAmount',      fmtAmountCell(t));
+  set('txdName',        name);
+  set('txdType',        TYPE_VISUALS[t.type ?? '']?.label ?? (t.type ?? '—'));
+  set('txdDate',        t.date);
+  set('txdTime',        t.time || '—');
+  set('txdAmount',      fmtAmountCell(t));
   // The amount cell already includes the currency symbol; clear the
   // standalone currency field so it doesn't render a duplicate.
-  set('adCurrency',    '');
-  set('adDescription', t.description || '—');
+  set('txdCurrency',    '');
+  set('txdDescription', t.description || '—');
   // Address + tx hash use the dashboard's truncated + hover/copy treatment.
-  const addrEl = document.getElementById('adAddr');
+  const addrEl = document.getElementById('txdAddr');
   if (addrEl) addrEl.replaceChildren(buildCopyableValue(t.addr));
-  const txEl = document.getElementById('adTx');
+  const txEl = document.getElementById('txdTx');
   if (txEl) txEl.replaceChildren(buildCopyableValue(t.tx));
-  const explorer = document.getElementById('adExplorer') as HTMLAnchorElement | null;
+  const explorer = document.getElementById('txdExplorer') as HTMLAnchorElement | null;
   if (explorer) explorer.href = `${EXPLORER_URL}/tx/${t.tx}`;
   openM('auditDetail');
 }

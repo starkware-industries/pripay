@@ -190,9 +190,15 @@ body.light .scard.clickable:hover{background:var(--bg3)}
 .recent-empty{padding:26px 0;text-align:center;font-size:12.5px;color:var(--text3)}
 .company-card{background:var(--panel);border:1px solid var(--border);border-radius:var(--r2);padding:18px 20px;display:flex;align-items:flex-start;gap:20px;position:relative;overflow:hidden}
 /* Transaction-detail modal — clean label/value rows, generous spacing, no lines */
-.ad-grid{display:grid;grid-template-columns:auto 1fr;row-gap:15px;column-gap:24px;align-items:baseline}
-.ad-lbl{font-size:13px;color:var(--text3);white-space:nowrap}
-.ad-val{font-size:14px;text-align:right;font-weight:500;color:var(--text)}
+/* Transaction-detail modal. The `txd-` prefix is deliberate: these were `ad-grid`
+   / `ad-lbl` / `ad-val` (short for "audit detail"), and ad-blocker cosmetic filters
+   hide `.ad-grid` outright. That injects `display:none` from the user-stylesheet
+   cascade origin, which outranks even author `!important`, is invisible to page JS,
+   and logs nothing — the modal opened correctly populated and rendered blank. Do not
+   reintroduce an `ad`-prefixed class or id here; see test/no-adblock-bait.test.js. */
+.txd-grid{display:grid;grid-template-columns:auto 1fr;row-gap:15px;column-gap:24px;align-items:baseline}
+.txd-lbl{font-size:13px;color:var(--text3);white-space:nowrap}
+.txd-val{font-size:14px;text-align:right;font-weight:500;color:var(--text)}
 
 /* legacy dashboard classes kept for safety */
 .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
