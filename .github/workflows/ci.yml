@@ -1,0 +1,43 @@
+# Runs the test suite on pull requests, so the branch-protection ruleset on main has
+# something to gate on.
+#
+# No untrusted input is interpolated anywhere in this file: there are no
+# github.event.* expressions, so there is no workflow-injection surface. The token is
+# read-only (permissions: contents: read), matching the repository default.
+#
+# Deliberately does NOT run `npm install`. The privacy SDK is published to GitHub
+# Packages and needs a read:packages token, which a fork's PR would not have — and the
+# suite doesn't need an install anyway: node_modules is committed, and the tests only
+# touch node built-ins plus express and cors, which are present and built for
+# linux-x64, the platform these runners use.
+#
+# `npm run typecheck` is not run here for the same reason: typescript is a devDependency
+# that isn't in the committed tree. Run it locally; see tsconfig.json for the known
+# 9-error baseline.
+#
+# Actions are pinned to full commit SHAs because the repository requires SHA pinning,
+# and restricted to GitHub-owned actions (verified_allowed is off).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Use Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+
+      - name: Test
+        run: npm test
