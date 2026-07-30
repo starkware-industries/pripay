@@ -75,8 +75,13 @@ function buildCompanyCardBody(c: typeof state.companyInfo, walletShort: string):
     const operators = (c.operatorEmails && c.operatorEmails.length
       ? c.operatorEmails
       : (c.operatorEmail ? [c.operatorEmail] : []));
+    const accountantWallets = c.accountantWallets ?? [];
     const parts: string[] = [];
     if (accountants.length) parts.push(`accountant ${accountants.join(', ')}`);
+    // Shortened: these are the wallets that actually hold edit access.
+    if (accountantWallets.length) {
+      parts.push(`accountant wallet ${accountantWallets.map((w) => `${w.slice(0, 6)}…${w.slice(-4)}`).join(', ')}`);
+    }
     if (operators.length)   parts.push(`operator ${operators.join(', ')}`);
     if (parts.length) {
       const row = buildCompanyRow('Team', parts.join(' · '));
@@ -129,6 +134,7 @@ function fillCompanyForm(c: CompanyInfo): void {
     ? c.operatorEmails : (c.operatorEmail ? [c.operatorEmail] : []);
   (document.getElementById('ec-accountant-email') as HTMLInputElement).value = accountants.join(', ');
   (document.getElementById('ec-operator-email')   as HTMLInputElement).value = operators.join(', ');
+  (document.getElementById('ec-accountant-wallet') as HTMLInputElement).value = (c.accountantWallets ?? []).join(', ');
 }
 
 function openEditCompany(): void {
@@ -140,7 +146,7 @@ function openEditCompany(): void {
 // Admin entry point (from Settings): edit a specific wallet's company overview.
 export function openEditCompanyFor(addr: string, company: CompanyInfo | null): void {
   editingCompanyAddr = addr;
-  fillCompanyForm(company ?? { ...state.companyInfo, name: '', tagline: '', email: '', legal: '', accountantEmails: undefined, operatorEmails: undefined });
+  fillCompanyForm(company ?? { ...state.companyInfo, name: '', tagline: '', email: '', legal: '', accountantEmails: undefined, operatorEmails: undefined, accountantWallets: undefined });
   openM('editCompany');
 }
 
@@ -148,9 +154,17 @@ function parseEmailList(raw: string): string[] {
   return raw.split(/[,\n;]+/).map((s) => s.trim()).filter((s) => !!s);
 }
 
+// Keeps only well-formed felt addresses — a malformed entry would silently never
+// match the session address, reading as "my accountant lost access" instead of a
+// typo. parseEmailList's splitting is reused; only the validation differs.
+function parseWalletList(raw: string): string[] {
+  return parseEmailList(raw).filter((s) => /^0x[0-9a-fA-F]{1,64}$/.test(s));
+}
+
 function readCompanyForm(): CompanyInfo {
   const accountantEmails = parseEmailList((document.getElementById('ec-accountant-email') as HTMLInputElement).value);
   const operatorEmails   = parseEmailList((document.getElementById('ec-operator-email')   as HTMLInputElement).value);
+  const accountantWallets = parseWalletList((document.getElementById('ec-accountant-wallet') as HTMLInputElement).value);
   return {
     name:    (document.getElementById('ec-name')    as HTMLInputElement).value.trim(),
     tagline: (document.getElementById('ec-tagline') as HTMLInputElement).value.trim(),
@@ -159,6 +173,7 @@ function readCompanyForm(): CompanyInfo {
     network: state.companyInfo.network,
     accountantEmails: accountantEmails.length ? accountantEmails : undefined,
     operatorEmails:   operatorEmails.length   ? operatorEmails   : undefined,
+    accountantWallets: accountantWallets.length ? accountantWallets : undefined,
   };
 }
 
