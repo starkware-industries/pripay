@@ -43,12 +43,11 @@ const TYPE_VISUALS: Record<string, { label: string; badgeClass: string; rowAccen
   Received:           { label: 'Received',      badgeClass: 'b-green' },
   Convert:            { label: 'Convert',       badgeClass: 'b-blue' },
   SelfTransfer:       { label: 'Internal',      badgeClass: 'b-gray',  rowAccent: 'var(--bg3)' },
-  Fee:                { label: 'Network fee',   badgeClass: 'b-gray' },
 };
 
 // Rows that moved value through the privacy pool (everything except the public
 // wallet-direct sends and the activation marker).
-const POOL_TYPES = new Set(['Deposit', 'OneTime', 'Recurrent', 'Withdraw', 'Received', 'Convert', 'SelfTransfer', 'Fee']);
+const POOL_TYPES = new Set(['Deposit', 'OneTime', 'Recurrent', 'Withdraw', 'Received', 'Convert', 'SelfTransfer']);
 // Rows where value came IN to the operator, for the direction arrow.
 const INBOUND_TYPES = new Set(['Deposit', 'Received', 'Convert']);
 

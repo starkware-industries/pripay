@@ -99,9 +99,10 @@ export interface AuditTx {
   // Recurrent/UnshieldedTransfer labels. Previously only OneTime, Recurrent,
   // Deposit, Onboard and UnshieldedTransfer existed, and fetchAuditHistory
   // silently discarded every action it had no type for — withdrawals, received
-  // transfers, swaps, self-transfers and fees never reached the audit log.
+  // transfers, swaps and self-transfers never reached the audit log. Paymaster fees
+  // are classified but deliberately not shown; see the 'fee' case in audit-history.
   type?: 'OneTime' | 'Recurrent' | 'Deposit' | 'Onboard' | 'UnshieldedTransfer'
-    | 'Withdraw' | 'Received' | 'Convert' | 'SelfTransfer' | 'Fee';
+    | 'Withdraw' | 'Received' | 'Convert' | 'SelfTransfer';
   // True when the row originated from a wallet-direct ERC20 transfer
   // (i.e. didn't go through the privacy pool). Survives type re-labels
   // so an unshielded-recurrent row keeps its "no shield" rendering.

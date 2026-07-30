@@ -1,6 +1,7 @@
 import { hash, type ProviderInterface } from 'starknet';
 import type { AuditTx } from './types';
 import { TOKENS } from './validators';
+import { getBlockTimestamps } from './block-time';
 import { state, getUnshieldedTxs } from './state';
 
 // Scan the wallet's full ERC20 transfer history (block 0 → latest) on
@@ -156,16 +157,11 @@ export async function fetchUnshieldedHistory(provider: ProviderInterface): Promi
   ));
   const blockTs = new Map<number, { date: string; time: string }>();
   if (unresolved.length > 0) {
-    await Promise.all(
-      unresolved.map(async (bn) => {
-        try {
-          const block = await provider.getBlock(bn) as unknown as { timestamp?: number };
-          if (typeof block.timestamp === 'number') {
-            blockTs.set(bn, formatLocalDateTime(block.timestamp * 1000));
-          }
-        } catch { /* best-effort */ }
-      }),
-    );
+    // Shared permanent cache — blocks already resolved by the private-history
+    // sweep (or by an earlier session) cost nothing here.
+    for (const [bn, ts] of await getBlockTimestamps(provider, unresolved)) {
+      blockTs.set(bn, formatLocalDateTime(ts * 1000));
+    }
     // Persist the resolved timestamps back onto cached events so the
     // next refresh skips them entirely.
     for (const ev of collected) {

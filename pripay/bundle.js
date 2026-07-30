@@ -27298,6 +27298,54 @@ var TOKENS = {
   eth: { address: "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7", decimals: 18 }
 };
 
+// src/core/block-time.ts
+var CACHE_KEY = "pripay:blockTimeCache";
+var MAX_ENTRIES = 8e3;
+var CONCURRENCY = 16;
+var mem = null;
+function load() {
+  if (mem) return mem;
+  mem = /* @__PURE__ */ new Map();
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (raw) for (const [k, v] of Object.entries(JSON.parse(raw))) {
+      mem.set(Number(k), v);
+    }
+  } catch {
+  }
+  return mem;
+}
+function persist() {
+  if (!mem) return;
+  try {
+    const entries = [...mem.entries()].sort((a, b) => b[0] - a[0]).slice(0, MAX_ENTRIES);
+    mem = new Map(entries);
+    localStorage.setItem(CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+  }
+}
+async function getBlockTimestamps(provider, blockNumbers) {
+  const cache2 = load();
+  const missing = [...new Set(blockNumbers)].filter((bn) => !cache2.has(bn));
+  for (let i = 0; i < missing.length; i += CONCURRENCY) {
+    const batch = missing.slice(i, i + CONCURRENCY);
+    await Promise.all(batch.map(async (bn) => {
+      try {
+        const block = await provider.getBlock(bn);
+        if (typeof block.timestamp === "number") cache2.set(bn, block.timestamp);
+      } catch {
+      }
+    }));
+  }
+  if (missing.length) persist();
+  const out = /* @__PURE__ */ new Map();
+  for (const bn of blockNumbers) {
+    const ts = cache2.get(bn);
+    if (ts !== void 0) out.set(bn, ts);
+  }
+  return out;
+}
+
 // src/core/audit-history.ts
 var MAX_HISTORY_PAGES = 20;
 var FEE_RECIPIENTS = PAYMASTER_FORWARDER ? [toBigintSafe(PAYMASTER_FORWARDER)] : [];
@@ -27340,17 +27388,9 @@ async function fetchAuditHistory(transfers, starknetProvider) {
   }
   const blockNumbers = Array.from(new Set(allTxs.map((t) => t.blockNumber)));
   const localByBlock = /* @__PURE__ */ new Map();
-  await Promise.all(
-    blockNumbers.map(async (bn) => {
-      try {
-        const block = await starknetProvider.getBlock(bn);
-        if (typeof block.timestamp === "number") {
-          localByBlock.set(bn, formatLocalDateTime(block.timestamp * 1e3));
-        }
-      } catch {
-      }
-    })
-  );
+  for (const [bn, ts] of await getBlockTimestamps(starknetProvider, blockNumbers)) {
+    localByBlock.set(bn, formatLocalDateTime(ts * 1e3));
+  }
   const entries = [];
   for (const tx of allTxs) {
     const classified = classifyTransaction(tx, FEE_RECIPIENTS.length ? { feeRecipients: FEE_RECIPIENTS } : void 0);
@@ -27465,20 +27505,8 @@ async function fetchAuditHistory(transfers, starknetProvider) {
           });
           break;
         }
-        case "fee": {
-          const info = tokenInfo(action.token);
-          entries.push({
-            date,
-            time,
-            amount: bigIntToHuman(action.amount, info?.decimals ?? 18),
-            currency: info?.symbol ?? "UNK",
-            tx: txHash,
-            addr: "0x" + action.toAddress.toString(16).padStart(64, "0"),
-            description: "Network fee (paymaster)",
-            type: "Fee"
-          });
+        case "fee":
           break;
-        }
         default: {
           const unknown = action;
           console.warn("[audit] unhandled history action, row omitted:", unknown);
@@ -27527,11 +27555,11 @@ function isSequencerFeeAddr(addr) {
     return false;
   }
 }
-var CACHE_KEY = "pripay:unshieldedHistoryCache";
+var CACHE_KEY2 = "pripay:unshieldedHistoryCache";
 var cache = loadCache();
 function loadCache() {
   try {
-    const raw = localStorage.getItem(CACHE_KEY);
+    const raw = localStorage.getItem(CACHE_KEY2);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -27540,7 +27568,7 @@ function loadCache() {
 function persistCache() {
   if (!cache) return;
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
+    localStorage.setItem(CACHE_KEY2, JSON.stringify(cache));
   } catch {
   }
 }
@@ -27615,17 +27643,9 @@ async function fetchUnshieldedHistory(provider) {
   ));
   const blockTs = /* @__PURE__ */ new Map();
   if (unresolved.length > 0) {
-    await Promise.all(
-      unresolved.map(async (bn) => {
-        try {
-          const block = await provider.getBlock(bn);
-          if (typeof block.timestamp === "number") {
-            blockTs.set(bn, formatLocalDateTime2(block.timestamp * 1e3));
-          }
-        } catch {
-        }
-      })
-    );
+    for (const [bn, ts] of await getBlockTimestamps(provider, unresolved)) {
+      blockTs.set(bn, formatLocalDateTime2(ts * 1e3));
+    }
     for (const ev of collected) {
       if (!ev.date && typeof ev.blockNumber === "number") {
         const ts = blockTs.get(ev.blockNumber);
@@ -33488,10 +33508,9 @@ var TYPE_VISUALS = {
   Withdraw: { label: "Unshield", badgeClass: "b-amber" },
   Received: { label: "Received", badgeClass: "b-green" },
   Convert: { label: "Convert", badgeClass: "b-blue" },
-  SelfTransfer: { label: "Internal", badgeClass: "b-gray", rowAccent: "var(--bg3)" },
-  Fee: { label: "Network fee", badgeClass: "b-gray" }
+  SelfTransfer: { label: "Internal", badgeClass: "b-gray", rowAccent: "var(--bg3)" }
 };
-var POOL_TYPES = /* @__PURE__ */ new Set(["Deposit", "OneTime", "Recurrent", "Withdraw", "Received", "Convert", "SelfTransfer", "Fee"]);
+var POOL_TYPES = /* @__PURE__ */ new Set(["Deposit", "OneTime", "Recurrent", "Withdraw", "Received", "Convert", "SelfTransfer"]);
 var INBOUND_TYPES = /* @__PURE__ */ new Set(["Deposit", "Received", "Convert"]);
 function isShieldedRow2(t) {
   if (t.unshielded) return false;

@@ -23,6 +23,8 @@ async function boot(env = {}) {
   delete process.env.GOOGLE_CLOUD_PROJECT;
   delete process.env.KV_REST_API_URL;
   delete process.env.UPSTASH_REDIS_REST_URL;
+  delete process.env.VERCEL_GIT_COMMIT_SHA;
+  delete process.env.VERCEL_DEPLOYMENT_ID;
   for (const [k, v] of Object.entries(env)) {
     if (v === null) delete process.env[k]; else process.env[k] = v;
   }
@@ -171,5 +173,49 @@ test('the ceilings apply only to the method that spends credits', async () => {
       });
       assert.strictEqual(r.status, 502, `${method} must not be blocked by the spend ceiling`);
     }
+  } finally { server.close(); }
+});
+
+// ── asset revalidation ──────────────────────────────────────────────────────
+// Vercel freezes every build file's mtime to a fixed 2018 epoch, and Express derives
+// its default ETag from size+mtime — so two deploys are distinguishable to a browser
+// only by byte length, and bundle.js has no content hash in its name. A stale
+// index.html paired with a fresh bundle.js fails silently, because showAuditDetail's
+// DOM writes are null-safe: the detail modal just renders empty, with no error.
+// The validator is keyed on the deployment instead.
+test('HTML and assets are served with no-cache and a deployment-keyed ETag', async () => {
+  const { server, base } = await boot({ VERCEL_GIT_COMMIT_SHA: 'deadbeefcafe' });
+  try {
+    for (const p of ['/', '/app', '/bundle.js', '/styles.css']) {
+      const r = await fetch(`${base}${p}`);
+      assert.strictEqual(r.headers.get('cache-control'), 'no-cache', `${p} must revalidate`);
+      assert.strictEqual(r.headers.get('etag'), 'W/"pripay-deadbeefcafe"', `${p} ETag keyed on the build`);
+      // The frozen mtime validator must not come back via express.static.
+      assert.strictEqual(r.headers.get('last-modified'), null, `${p} must not send Last-Modified`);
+    }
+  } finally { server.close(); }
+});
+
+test('a matching ETag gets a cheap 304, a stale one gets fresh content', async () => {
+  const { server, base } = await boot({ VERCEL_GIT_COMMIT_SHA: 'sha-one' });
+  try {
+    const current = 'W/"pripay-sha-one"';
+    const hit = await fetch(`${base}/app`, { headers: { 'If-None-Match': current } });
+    assert.strictEqual(hit.status, 304, 'unchanged deployment revalidates cheaply');
+
+    // An ETag from a previous deployment must NOT be honoured — this is the case the
+    // size+mtime validator got wrong.
+    const stale = await fetch(`${base}/app`, { headers: { 'If-None-Match': 'W/"pripay-sha-zero"' } });
+    assert.strictEqual(stale.status, 200, 'a previous deployment must be re-fetched');
+    assert.ok((await stale.text()).includes('Transaction detail'), 'and must return the real HTML');
+  } finally { server.close(); }
+});
+
+test('API responses are left out of the asset caching rules', async () => {
+  const { server, base } = await boot({ VERCEL_GIT_COMMIT_SHA: 'sha-one' });
+  try {
+    const r = await fetch(`${base}/api/me`);
+    assert.strictEqual(r.status, 200);
+    assert.notStrictEqual(r.headers.get('etag'), 'W/"pripay-sha-one"', 'API must not share the build ETag');
   } finally { server.close(); }
 });

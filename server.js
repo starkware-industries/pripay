@@ -324,16 +324,50 @@ app.use('/api/prover', gateProxy('prover', 30, 60000), streamProxy(PROVER_UPSTRE
 
 app.use(express.json({ limit: '2mb' }));
 
+// Asset revalidation, keyed on the deployment. MUST precede the HTML routes and
+// express.static below, or the two files that matter most — index.html and
+// bundle.js — keep the default validator.
+//
+// Vercel normalizes every build file's mtime to a fixed 2018 epoch, and Express
+// derives its default ETag from size+mtime — so across two deploys the only thing
+// distinguishing an asset is its byte length, with a permanently frozen
+// Last-Modified. bundle.js carries no content hash in its name, so nothing else
+// breaks the tie: a browser can hold a stale shell against a fresh bundle (or the
+// reverse) and never notice. Since showAuditDetail's DOM writes are null-safe
+// (`if (el) el.textContent = …`), a stale index.html paired with a fresh bundle.js
+// fails completely silently — the modal just renders empty, no console error.
+//
+// Use the commit SHA as the validator instead: every deploy changes it, so caches
+// break deterministically, while within a deploy repeat loads are cheap 304s.
+const BUILD_ID = process.env.VERCEL_GIT_COMMIT_SHA
+  || process.env.VERCEL_DEPLOYMENT_ID
+  || `dev-${process.pid}-${Date.now()}`;
+const BUILD_ETAG = `W/"pripay-${BUILD_ID}"`;
+
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (req.path.startsWith('/api')) return next();
+  res.setHeader('Cache-Control', 'no-cache');   // revalidate every load, 304 when unchanged
+  res.setHeader('ETag', BUILD_ETAG);
+  if (req.headers['if-none-match'] === BUILD_ETAG) return res.status(304).end();
+  next();
+});
+
 // Landing page at the root; the app itself lives at /app. Registered before
 // the static middleware, which would otherwise serve index.html at /.
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'pripay', 'landing.html')));
+// sendFile sets its own etag/Last-Modified unless told not to — the same frozen-mtime
+// validator the middleware above replaced, so it has to be disabled here too.
+const SEND_OPTS = { etag: false, lastModified: false };
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'pripay', 'landing.html'), SEND_OPTS));
 app.get('/app', (req, res) => {
   // Normalize /app/ → /app so index.html's relative asset URLs resolve at the root.
   if (req.path !== '/app') return res.redirect(301, '/app');
-  res.sendFile(path.join(__dirname, 'pripay', 'index.html'));
+  res.sendFile(path.join(__dirname, 'pripay', 'index.html'), SEND_OPTS);
 });
 
-app.use(express.static(path.join(__dirname, 'pripay')));
+// etag/lastModified off so express.static can't reinstate the size+mtime validator
+// the middleware above deliberately replaced.
+app.use(express.static(path.join(__dirname, 'pripay'), { etag: false, lastModified: false }));
 
 // ── SIWS auth endpoints ──
 // 1) issue a short-lived, address-bound nonce for the wallet to sign.
